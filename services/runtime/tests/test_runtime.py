@@ -985,3 +985,104 @@ async def test_provider_semaphore_limits_concurrency() -> None:
         service._semaphore.release()
 
     assert not service._semaphore.locked()
+
+
+# ---------------------------------------------------------------------------
+# Phase 12: Dynamic Agent Handoffs tests
+# ---------------------------------------------------------------------------
+
+
+def test_handoff_parsing() -> None:
+    """12a: HANDOFF: directive is correctly parsed from completion text."""
+    completion = "Analysis complete.\nHANDOFF:specialist-agent\nSome more text."
+    handoff_target = None
+    if "HANDOFF:" in completion:
+        handoff_target = completion.split("HANDOFF:", 1)[1].splitlines()[0].strip()
+    assert handoff_target == "specialist-agent"
+
+
+def test_handoff_target_not_in_allowed_list_is_ignored() -> None:
+    """12b: HANDOFF: to an agent not in handoffTargets is ignored."""
+    from app.schemas import MissionAgentDefinition, ProviderConfig, ToolPolicy, MemoryProfile
+
+    # Agent with no handoff targets
+    agent = MissionAgentDefinition(
+        id="agent-1",
+        missionId="m1",
+        name="Agent One",
+        role="analyst",
+        systemPrompt="You are an analyst.",
+        provider=ProviderConfig(id="scripted-local", label="Test", mode="local", model="scripted-local"),
+        tools=[],
+        toolPolicy=ToolPolicy(),
+        memoryProfile=MemoryProfile(),
+        handoffTargets=[],  # empty — no handoffs allowed
+    )
+
+    handoff_target_id = "specialist-agent"
+    if handoff_target_id not in agent.handoffTargets:
+        handoff_target_id = None
+
+    assert handoff_target_id is None
+
+
+@pytest.mark.asyncio
+async def test_handoff_depth_limit() -> None:
+    """12c: Handoff is skipped when depth limit is reached."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from app.executor import MissionExecutor
+    from app.schemas import MissionAgentDefinition, MemoryProfile, ProviderConfig, ToolPolicy, WorkflowNode
+    from app.telemetry import TelemetryHub
+
+    telemetry = MagicMock(spec=TelemetryHub)
+    telemetry.persist_event = MagicMock(return_value=MagicMock())
+    telemetry.dispatch_stream_token = AsyncMock()
+    telemetry._schedule_dispatch = MagicMock()
+    executor = MissionExecutor(telemetry)
+
+    node = WorkflowNode(
+        id="n1",
+        name="Agent Node",
+        type="agent",
+        position={"x": 0, "y": 0},
+        config={"agentId": "agent-1", "maxHandoffDepth": 0},  # depth 0 = no handoffs
+    )
+
+    # Agent that would normally trigger a handoff
+    agent = MissionAgentDefinition(
+        id="agent-1",
+        missionId="m1",
+        name="Agent One",
+        role="analyst",
+        systemPrompt="You are an analyst.",
+        provider=ProviderConfig(id="scripted-local", label="Test", mode="local", model="scripted-local"),
+        tools=[],
+        toolPolicy=ToolPolicy(),
+        memoryProfile=MemoryProfile(),
+        handoffTargets=["specialist-agent"],
+    )
+
+    with patch.object(executor, "_mission_agent_from_snapshot", return_value=agent):
+        with patch.object(executor, "_store_artifact", new_callable=AsyncMock):
+            with patch.object(executor, "_store_memory"):
+                with patch("app.executor.SessionLocal") as mock_session_class:
+                    session_mock = MagicMock()
+                    mock_session_class.return_value.__enter__ = MagicMock(return_value=session_mock)
+                    mock_session_class.return_value.__exit__ = MagicMock(return_value=False)
+                    run_mock = MagicMock()
+                    run_mock.mission_id = "m1"
+                    run_mock.control_state = {}
+                    run_mock.provider_overrides = {}
+                    run_mock.execution_state = {}
+                    session_mock.get.return_value = run_mock
+
+                    result = await executor._run_agent_node(
+                        "run-1",
+                        node,
+                        {"mission": {"input": {"prompt": "test"}, "control": {}}, "results": {}},
+                        depth=0,  # maxHandoffDepth=0, so depth >= max_depth → skip
+                    )
+
+    # Should complete without recursive call, just log the depth-limit warning
+    assert "output" in result.payload

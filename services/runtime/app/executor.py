@@ -397,7 +397,7 @@ class MissionExecutor:
         messages.append({"role": "user", "content": new_user_prompt})
         return messages
 
-    async def _run_agent_node(self, run_id: str, node: WorkflowNode, context: dict[str, Any]) -> NodeResult:
+    async def _run_agent_node(self, run_id: str, node: WorkflowNode, context: dict[str, Any], depth: int = 0) -> NodeResult:
         with SessionLocal() as session:
             run = session.get(MissionRun, run_id)
             if run is None:
@@ -482,9 +482,80 @@ class MissionExecutor:
         route = None
         if "ROUTE:" in completion:
             route = completion.split("ROUTE:", 1)[1].splitlines()[0].strip()
+
+        handoff_target_id: str | None = None
+        if "HANDOFF:" in completion:
+            handoff_target_id = completion.split("HANDOFF:", 1)[1].splitlines()[0].strip()
+
+        if handoff_target_id and handoff_target_id not in agent.handoffTargets:
+            logger.warning(
+                "Agent %s emitted HANDOFF:%s but %s is not in handoffTargets; ignoring",
+                agent.id, handoff_target_id, handoff_target_id,
+            )
+            handoff_target_id = None
+
         payload: dict[str, Any] = {"agentId": agent.id, "agentName": agent.name, "output": completion}
         if route:
             payload["route"] = route
+
+        if handoff_target_id:
+            max_depth = int(node.config.get("maxHandoffDepth", 3))
+            if depth >= max_depth:
+                logger.warning(
+                    "Handoff depth limit %d reached for node %s; skipping handoff to %s",
+                    max_depth, node.id, handoff_target_id,
+                )
+            else:
+                # Emit handoff telemetry
+                with SessionLocal() as session:
+                    run = session.get(MissionRun, run_id)
+                    if run is not None:
+                        self.telemetry.persist_event(
+                            session,
+                            run.mission_id,
+                            run.id,
+                            "node.handoff",
+                            f"Handing off from {agent.name} to {handoff_target_id}",
+                            node_id=node.id,
+                            data={"sourceAgent": agent.id, "targetAgent": handoff_target_id},
+                        )
+
+                # Find the target agent from the mission's agent snapshot
+                target_agent = None
+                with SessionLocal() as session:
+                    run = session.get(MissionRun, run_id)
+                    if run is not None:
+                        try:
+                            target_agent = self._mission_agent_from_snapshot(run, handoff_target_id)
+                        except RuntimeError as exc:
+                            logger.warning("Handoff target %s not found: %s", handoff_target_id, exc)
+
+                if target_agent is not None:
+                    # Create a synthetic node config for the target agent
+                    target_node = WorkflowNode(
+                        id=f"{node.id}-handoff-{handoff_target_id}",
+                        name=f"Handoff: {target_agent.name}",
+                        type="agent",
+                        position=node.position,
+                        config={
+                            "agentId": target_agent.id,
+                            "promptTemplate": (
+                                "You are receiving a handoff from another agent.\n"
+                                "Prior agent output:\n{{results." + node.id + ".output}}\n\n"
+                                "Mission input:\n{{mission.input.prompt}}"
+                            ),
+                        },
+                    )
+                    # Update context with current node's result for handoff template access
+                    handoff_context = copy.deepcopy(context)
+                    handoff_context.setdefault("results", {})[node.id] = {"output": completion}
+                    handoff_result = await self._run_agent_node(run_id, target_node, handoff_context, depth=depth + 1)
+                    payload["handoffOutput"] = {
+                        "agentId": target_agent.id,
+                        "agentName": target_agent.name,
+                        "output": handoff_result.payload.get("output", ""),
+                    }
+
         await self._store_artifact(
             run_id, node.id, "agent-output", node.name, json.dumps(payload, indent=2),
             max_artifacts=agent.toolPolicy.maxArtifacts,
