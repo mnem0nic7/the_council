@@ -17,6 +17,7 @@ import {
   commandPanelStorageKey
 } from "../../lib/utils/constants";
 import { PanelResizer } from "../ui/panel-resizer";
+import { TelemetryStream } from "../telemetry/telemetry-stream";
 
 export function CommandDeck({
   busy,
@@ -270,9 +271,10 @@ export function CommandDeck({
 
       <div
         data-testid="command-telemetry-panel"
-        className="panel min-w-0 rounded-[1.8rem] border border-white/8 bg-black/15 p-4"
+        className="panel min-w-0 rounded-[1.8rem] border border-white/8 bg-black/15 p-4 flex flex-col"
+        style={{ minHeight: "20rem", maxHeight: "52rem" }}
       >
-        <div className="mb-3 flex items-center justify-between">
+        <div className="mb-3 flex items-center justify-between shrink-0">
           <div>
             <p className="panel-title text-amber-300">Live Telemetry</p>
             <h3 className="mt-2 text-lg text-white">Selected run event stream</h3>
@@ -281,32 +283,9 @@ export function CommandDeck({
         </div>
         <div
           data-testid="command-telemetry-stream"
-          className="scroll-thin max-h-[52rem] space-y-3 overflow-y-auto overflow-x-hidden pr-1"
+          className="flex-1 min-h-0"
         >
-          {telemetry.map((event) => (
-            <div
-              key={event.id}
-              data-testid={`telemetry-${event.type}`}
-              className="min-w-0 rounded-2xl border border-white/8 bg-black/20 p-3"
-            >
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <strong className="min-w-0 break-words text-sm text-white">{event.type}</strong>
-                <span className="text-xs uppercase tracking-[0.16em] text-slate-400">{event.severity}</span>
-              </div>
-              <p className="mt-2 break-words text-sm text-slate-300">{event.message}</p>
-              <pre
-                data-testid="telemetry-payload"
-                className="mt-3 max-w-full whitespace-pre-wrap break-words rounded-xl bg-black/30 p-3 text-xs text-cyan-100 [overflow-wrap:anywhere]"
-              >
-                {JSON.stringify(event.data, null, 2)}
-              </pre>
-            </div>
-          ))}
-          {telemetry.length === 0 ? (
-            <p className="rounded-2xl border border-dashed border-white/10 p-4 text-sm text-slate-400">
-              Select or launch a run to stream live telemetry.
-            </p>
-          ) : null}
+          <TelemetryStream events={telemetry} title="Mission Telemetry" />
         </div>
       </div>
     </div>
