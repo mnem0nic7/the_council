@@ -1,0 +1,51 @@
+from __future__ import annotations
+
+import os
+from typing import Any
+
+from litellm import acompletion
+
+from app.schemas import ProviderConfig
+
+
+class ProviderService:
+    async def complete(
+        self,
+        provider: ProviderConfig,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> str:
+        if provider.id == "scripted-local" or provider.model == "scripted-local":
+            return self._scripted_response(system_prompt, user_prompt)
+
+        request: dict[str, Any] = {
+            "model": provider.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": provider.temperature,
+            "max_tokens": provider.maxTokens,
+        }
+        if provider.baseUrl:
+            request["api_base"] = provider.baseUrl
+        if provider.apiKeyEnv:
+            api_key = os.getenv(provider.apiKeyEnv)
+            if api_key:
+                request["api_key"] = api_key
+
+        response = await acompletion(**request)
+        return response.choices[0].message.content or ""
+
+    def _scripted_response(self, system_prompt: str, user_prompt: str) -> str:
+        preview = user_prompt.replace("\n", " ").strip()[:240]
+        if "route=" in preview:
+            route = preview.split("route=", 1)[1].split()[0]
+            return f"ROUTE:{route}\n{preview}"
+        return (
+            "Mission analysis complete.\n"
+            f"System stance: {system_prompt[:80]}\n"
+            f"Operator input: {preview}"
+        )
+

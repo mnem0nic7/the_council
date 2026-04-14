@@ -1,0 +1,8 @@
+upstream council_web {
+  server web-${ACTIVE_COLOR}:3000;
+}
+
+upstream council_runtime {
+  server runtime-${ACTIVE_COLOR}:8000;
+}
+

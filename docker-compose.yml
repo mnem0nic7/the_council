@@ -1,0 +1,72 @@
+version: "3.9"
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    environment:
+      NEXT_PUBLIC_RUNTIME_URL: http://localhost:8000/api/v1
+      NEXT_PUBLIC_WS_URL: ws://localhost:8000/ws
+    ports:
+      - "3000:3000"
+    depends_on:
+      - runtime
+
+  runtime:
+    build:
+      context: ./services/runtime
+    environment:
+      DATABASE_URL: postgresql+psycopg://council:council@postgres:5432/council
+      REDIS_URL: redis://redis:6379/0
+      ARTIFACT_ROOT: /app/data/artifacts
+      OBJECT_STORE_ENDPOINT: minio:9000
+      OBJECT_STORE_ACCESS_KEY: council
+      OBJECT_STORE_SECRET_KEY: council123
+      OBJECT_STORE_BUCKET: council-artifacts
+      OBJECT_STORE_SECURE: "false"
+      JWT_SECRET: change-me
+      COUNCIL_OPERATOR_USERNAME: captain
+      COUNCIL_OPERATOR_PASSWORD: bridge123
+      WEB_ORIGIN: http://localhost:3000
+    ports:
+      - "8000:8000"
+    volumes:
+      - runtime-data:/app/data
+    depends_on:
+      - postgres
+      - redis
+      - minio
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: council
+      POSTGRES_USER: council
+      POSTGRES_PASSWORD: council
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: council
+      MINIO_ROOT_PASSWORD: council123
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+
+volumes:
+  postgres-data:
+  runtime-data:
+  minio-data:

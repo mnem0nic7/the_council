@@ -1,0 +1,17 @@
+{
+  "name": "@the-council/contracts",
+  "version": "0.1.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/export-schemas.cjs"
+  },
+  "dependencies": {
+    "zod": "^3.23.8",
+    "zod-to-json-schema": "^3.23.5"
+  }
+}
+

@@ -1,0 +1,25 @@
+{
+  "name": "the-council",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -n web,runtime -c cyan,magenta \"npm run dev --workspace @the-council/web\" \"cd services/runtime && ../../.venv/bin/uvicorn app.main:app --reload --host 0.0.0.0 --port 8000\"",
+    "dev:web": "npm run dev --workspace @the-council/web",
+    "build": "npm run build --workspace @the-council/contracts && npm run build --workspace @the-council/web",
+    "lint": "npm run lint --workspace @the-council/web",
+    "test": "npm run build --workspace @the-council/contracts",
+    "test:runtime": ".venv/bin/pytest services/runtime/tests -q",
+    "test:build": "npm run build",
+    "test:ci": "npm run test:build && npm run test:runtime && npm run test:e2e",
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.55.0",
+    "concurrently": "^9.1.0",
+    "typescript": "^5.6.3"
+  }
+}
