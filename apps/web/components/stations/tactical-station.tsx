@@ -10,6 +10,7 @@ import type {
 } from "@the-council/contracts";
 import { nodeTypeCatalog, toolCatalog } from "../../lib/utils/constants";
 import { configJson, defaultNodeConfig, parseConfigJson } from "../../lib/utils/workflow";
+import { WorkflowCanvas } from "./workflow-canvas";
 
 export function TacticalStation({
   busy,
@@ -19,6 +20,7 @@ export function TacticalStation({
   missionAgents,
   editsAllowed,
   newNodeType,
+  selectedNodeId,
   onNewNodeType,
   onUpdateWorkflow,
   onPatchNode,
@@ -27,6 +29,7 @@ export function TacticalStation({
   onRemoveEdge,
   onAddNode,
   onAddEdge,
+  onSelectNode,
   onJsonChange,
   onSave
 }: {
@@ -37,6 +40,7 @@ export function TacticalStation({
   missionAgents: MissionAgentDefinition[];
   editsAllowed: boolean;
   newNodeType: WorkflowNodeType;
+  selectedNodeId: string | null;
   onNewNodeType: (value: WorkflowNodeType) => void;
   onUpdateWorkflow: (workflow: WorkflowDefinition) => void;
   onPatchNode: (nodeId: string, updater: (node: WorkflowNode) => WorkflowNode) => void;
@@ -44,7 +48,8 @@ export function TacticalStation({
   onRemoveNode: (nodeId: string) => void;
   onRemoveEdge: (edgeId: string) => void;
   onAddNode: () => void;
-  onAddEdge: () => void;
+  onAddEdge: (sourceId?: string, targetId?: string) => void;
+  onSelectNode: (nodeId: string | null) => void;
   onJsonChange: (value: string) => void;
   onSave: () => void;
 }) {
@@ -55,6 +60,8 @@ export function TacticalStation({
       </div>
     );
   }
+
+  const selectedNode = selectedNodeId ? workflow.nodes.find((n) => n.id === selectedNodeId) ?? null : null;
 
   return (
     <div className="space-y-5">
@@ -105,7 +112,7 @@ export function TacticalStation({
                 </button>
                 <button
                   type="button"
-                  onClick={onAddEdge}
+                  onClick={() => onAddEdge()}
                   disabled={!editsAllowed || workflow.nodes.length < 2}
                   className="rounded-full border border-white/10 bg-black/20 px-4 py-2 text-xs uppercase tracking-[0.18em] text-slate-200 transition hover:border-cyan-300/30 disabled:opacity-50"
                 >
@@ -114,58 +121,17 @@ export function TacticalStation({
               </div>
             </div>
 
-            <div className="relative min-h-[28rem] overflow-hidden rounded-[1.5rem] border border-white/8 bg-black/25">
-              <svg className="absolute inset-0 h-full w-full">
-                {workflow.edges.map((edge) => {
-                  const source = workflow.nodes.find((node) => node.id === edge.source);
-                  const target = workflow.nodes.find((node) => node.id === edge.target);
-                  if (!source || !target) {
-                    return null;
-                  }
-                  return (
-                    <g key={edge.id}>
-                      <line
-                        x1={source.position.x + 120}
-                        y1={source.position.y + 42}
-                        x2={target.position.x + 16}
-                        y2={target.position.y + 42}
-                        stroke="rgba(118,244,255,0.45)"
-                        strokeWidth={2}
-                        strokeDasharray={edge.condition ? "8 8" : undefined}
-                      />
-                      {edge.condition ? (
-                        <text
-                          x={(source.position.x + target.position.x) / 2}
-                          y={(source.position.y + target.position.y) / 2}
-                          fill="#f7b955"
-                          fontSize="11"
-                        >
-                          {edge.condition}
-                        </text>
-                      ) : null}
-                    </g>
-                  );
-                })}
-              </svg>
-              {workflow.nodes.map((node) => (
-                <div
-                  key={node.id}
-                  className="absolute w-56 rounded-2xl border border-white/10 bg-[rgba(5,18,31,0.92)] p-4 shadow-bridge"
-                  style={{ left: node.position.x, top: node.position.y }}
-                >
-                  <div className="mb-2 flex items-center justify-between gap-3">
-                    <strong className="text-sm text-white">{node.name}</strong>
-                    <span className="rounded-full border border-cyan-300/20 px-2 py-1 text-[10px] uppercase tracking-[0.16em] text-cyan-200">
-                      {node.type}
-                    </span>
-                  </div>
-                  <p className="text-xs text-slate-500">{node.id}</p>
-                  {"agentId" in node.config ? (
-                    <p className="mt-2 text-xs text-amber-200">{String(node.config.agentId)}</p>
-                  ) : null}
-                </div>
-              ))}
-            </div>
+            <WorkflowCanvas
+              workflow={workflow}
+              missionAgents={missionAgents}
+              editsAllowed={editsAllowed}
+              selectedNodeId={selectedNodeId}
+              onPatchNode={onPatchNode}
+              onRemoveNode={onRemoveNode}
+              onAddEdge={(sourceId, targetId) => onAddEdge(sourceId, targetId)}
+              onRemoveEdge={onRemoveEdge}
+              onSelectNode={onSelectNode}
+            />
           </div>
 
           <div className="rounded-[1.8rem] border border-white/8 bg-black/20 p-4">
@@ -265,15 +231,15 @@ export function TacticalStation({
               </span>
             </div>
             <div className="scroll-thin max-h-[34rem] space-y-4 overflow-auto pr-1">
-              {workflow.nodes.map((node) => (
-                <div key={node.id} className="rounded-2xl border border-white/8 bg-black/15 p-4">
+              {selectedNode ? (
+                <div key={selectedNode.id} className="rounded-2xl border border-white/8 bg-black/15 p-4">
                   <div className="grid gap-4 md:grid-cols-2">
                     <label className="block">
                       <span className="mb-2 block text-xs uppercase tracking-[0.2em] text-slate-500">Name</span>
                       <input
-                        value={node.name}
+                        value={selectedNode.name}
                         onChange={(event) =>
-                          onPatchNode(node.id, (current) => ({ ...current, name: event.target.value }))
+                          onPatchNode(selectedNode.id, (current) => ({ ...current, name: event.target.value }))
                         }
                         disabled={!editsAllowed}
                         className="w-full rounded-2xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white outline-none transition focus:border-cyan-300/50"
@@ -282,9 +248,9 @@ export function TacticalStation({
                     <label className="block">
                       <span className="mb-2 block text-xs uppercase tracking-[0.2em] text-slate-500">Type</span>
                       <select
-                        value={node.type}
+                        value={selectedNode.type}
                         onChange={(event) =>
-                          onPatchNode(node.id, (current) => ({
+                          onPatchNode(selectedNode.id, (current) => ({
                             ...current,
                             type: event.target.value as WorkflowNodeType,
                             config: defaultNodeConfig(event.target.value as WorkflowNodeType, missionAgents[0]?.id)
@@ -303,18 +269,18 @@ export function TacticalStation({
                     <label className="block">
                       <span className="mb-2 block text-xs uppercase tracking-[0.2em] text-slate-500">Node ID</span>
                       <input
-                        value={node.id}
+                        value={selectedNode.id}
                         disabled
                         className="w-full rounded-2xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-slate-400 outline-none"
                       />
                     </label>
-                    {node.type === "agent" || node.type === "tool" ? (
+                    {selectedNode.type === "agent" || selectedNode.type === "tool" ? (
                       <label className="block">
                         <span className="mb-2 block text-xs uppercase tracking-[0.2em] text-slate-500">Mission Agent</span>
                         <select
-                          value={String(node.config.agentId ?? "")}
+                          value={String(selectedNode.config.agentId ?? "")}
                           onChange={(event) =>
-                            onPatchNode(node.id, (current) => ({
+                            onPatchNode(selectedNode.id, (current) => ({
                               ...current,
                               config: { ...current.config, agentId: event.target.value }
                             }))
@@ -336,9 +302,9 @@ export function TacticalStation({
                         <div className="grid grid-cols-2 gap-2">
                           <input
                             type="number"
-                            value={node.position.x}
+                            value={selectedNode.position.x}
                             onChange={(event) =>
-                              onPatchNode(node.id, (current) => ({
+                              onPatchNode(selectedNode.id, (current) => ({
                                 ...current,
                                 position: { ...current.position, x: Number(event.target.value) || 0 }
                               }))
@@ -348,9 +314,9 @@ export function TacticalStation({
                           />
                           <input
                             type="number"
-                            value={node.position.y}
+                            value={selectedNode.position.y}
                             onChange={(event) =>
-                              onPatchNode(node.id, (current) => ({
+                              onPatchNode(selectedNode.id, (current) => ({
                                 ...current,
                                 position: { ...current.position, y: Number(event.target.value) || 0 }
                               }))
@@ -363,13 +329,13 @@ export function TacticalStation({
                     )}
                   </div>
 
-                  {node.type === "tool" ? (
+                  {selectedNode.type === "tool" ? (
                     <label className="mt-4 block">
                       <span className="mb-2 block text-xs uppercase tracking-[0.2em] text-slate-500">Tool</span>
                       <select
-                        value={String(node.config.tool ?? "shell")}
+                        value={String(selectedNode.config.tool ?? "shell")}
                         onChange={(event) =>
-                          onPatchNode(node.id, (current) => ({
+                          onPatchNode(selectedNode.id, (current) => ({
                             ...current,
                             config: { ...current.config, tool: event.target.value }
                           }))
@@ -389,11 +355,11 @@ export function TacticalStation({
                   <label className="mt-4 block">
                     <span className="mb-2 block text-xs uppercase tracking-[0.2em] text-slate-500">Config JSON</span>
                     <textarea
-                      value={configJson(node.config)}
+                      value={configJson(selectedNode.config)}
                       onChange={(event) => {
                         try {
                           const parsed = parseConfigJson(event.target.value);
-                          onPatchNode(node.id, (current) => ({ ...current, config: parsed }));
+                          onPatchNode(selectedNode.id, (current) => ({ ...current, config: parsed }));
                         } catch {
                           // Preserve the last valid draft until this node's config becomes valid again.
                         }
@@ -406,7 +372,7 @@ export function TacticalStation({
                   <div className="mt-3 flex justify-end">
                     <button
                       type="button"
-                      onClick={() => onRemoveNode(node.id)}
+                      onClick={() => onRemoveNode(selectedNode.id)}
                       disabled={!editsAllowed || workflow.nodes.length === 1}
                       className="rounded-full border border-rose-300/30 bg-rose-300/10 px-3 py-1.5 text-xs uppercase tracking-[0.16em] text-rose-100 transition hover:border-rose-200/50 hover:bg-rose-200/15 disabled:opacity-50"
                     >
@@ -414,7 +380,11 @@ export function TacticalStation({
                     </button>
                   </div>
                 </div>
-              ))}
+              ) : (
+                <p className="py-6 text-center text-sm text-slate-500">
+                  Click a node in the canvas to select and edit it.
+                </p>
+              )}
             </div>
           </div>
 

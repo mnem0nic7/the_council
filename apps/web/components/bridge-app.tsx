@@ -87,6 +87,7 @@ export function BridgeApp() {
   const [workflowDraft, setWorkflowDraft] = useState<WorkflowDefinition | null>(null);
   const [workflowJson, setWorkflowJson] = useState("");
   const [newNodeType, setNewNodeType] = useState<WorkflowNodeType>("agent");
+  const [selectedWorkflowNodeId, setSelectedWorkflowNodeId] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [retaskNote, setRetaskNote] = useState("");
@@ -304,15 +305,17 @@ export function BridgeApp() {
     updateWorkflow(next);
   }
 
-  function addWorkflowEdge() {
+  function addWorkflowEdge(sourceId?: string, targetId?: string) {
     if (!workflowDraft || workflowDraft.nodes.length < 2) {
       return;
     }
     const next = cloneWorkflow(workflowDraft);
+    const resolvedSource = sourceId ?? next.nodes[0].id;
+    const resolvedTarget = targetId ?? next.nodes[next.nodes.length - 1].id;
     next.edges.push({
       id: nextEdgeId(next),
-      source: next.nodes[0].id,
-      target: next.nodes[next.nodes.length - 1].id,
+      source: resolvedSource,
+      target: resolvedTarget,
       label: "",
       condition: undefined
     });
@@ -667,6 +670,7 @@ export function BridgeApp() {
                 missionAgents={missionAgents}
                 editsAllowed={structuralEditsAllowed}
                 newNodeType={newNodeType}
+                selectedNodeId={selectedWorkflowNodeId}
                 onNewNodeType={setNewNodeType}
                 onUpdateWorkflow={updateWorkflow}
                 onPatchNode={patchWorkflowNode}
@@ -675,6 +679,7 @@ export function BridgeApp() {
                 onRemoveEdge={removeWorkflowEdge}
                 onAddNode={addWorkflowNode}
                 onAddEdge={addWorkflowEdge}
+                onSelectNode={setSelectedWorkflowNodeId}
                 onJsonChange={handleWorkflowJsonChange}
                 onSave={() => void saveMissionWorkflow()}
               />
