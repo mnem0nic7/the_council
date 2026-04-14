@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { motion } from "framer-motion";
 import type {
   MissionAction,
   TelemetryEvent,
@@ -648,12 +647,7 @@ export function BridgeApp() {
         ) : null}
 
         <div className="grid gap-4 xl:grid-cols-[1.32fr_0.88fr]">
-          <motion.section
-            key={station}
-            initial={{ opacity: 0, y: 18 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="panel panel-grid min-h-[72vh] min-w-0 rounded-[2rem] p-5"
-          >
+          <section className="panel panel-grid min-h-[72vh] min-w-0 rounded-[2rem] p-5">
             <div
               id={`station-panel-${station}`}
               role="tabpanel"
@@ -733,7 +727,7 @@ export function BridgeApp() {
                 <ArchiveStation replay={replay} mission={selectedMission} run={selectedRun} />
               ) : null}
             </div>
-          </motion.section>
+          </section>
 
           <aside className="min-w-0 space-y-4">
             <MissionQueue
