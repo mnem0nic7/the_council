@@ -51,6 +51,9 @@ def ensure_runtime_schema() -> None:
     tables = set(inspector.get_table_names())
     if "missions" not in tables:
         return
+    dialect = engine.dialect.name
+    timestamp_type = "TIMESTAMP WITH TIME ZONE" if dialect == "postgresql" else "DATETIME"
+    json_type = "JSONB" if dialect == "postgresql" else "JSON"
 
     mission_columns = {column["name"] for column in inspector.get_columns("missions")}
     event_columns = {column["name"] for column in inspector.get_columns("mission_events")} if "mission_events" in tables else set()
@@ -62,13 +65,13 @@ def ensure_runtime_schema() -> None:
     if "description" not in mission_columns:
         statements.append("ALTER TABLE missions ADD COLUMN description TEXT DEFAULT ''")
     if "workflow_definition" not in mission_columns:
-        statements.append("ALTER TABLE missions ADD COLUMN workflow_definition JSON")
+        statements.append(f"ALTER TABLE missions ADD COLUMN workflow_definition {json_type}")
     if "active_run_id" not in mission_columns:
         statements.append("ALTER TABLE missions ADD COLUMN active_run_id VARCHAR")
     if "latest_run_id" not in mission_columns:
         statements.append("ALTER TABLE missions ADD COLUMN latest_run_id VARCHAR")
     if "updated_at" not in mission_columns:
-        statements.append("ALTER TABLE missions ADD COLUMN updated_at DATETIME")
+        statements.append(f"ALTER TABLE missions ADD COLUMN updated_at {timestamp_type}")
 
     if "run_id" not in event_columns and "mission_events" in tables:
         statements.append("ALTER TABLE mission_events ADD COLUMN run_id VARCHAR")
@@ -206,4 +209,3 @@ def migrate_legacy_missions() -> None:
                 mission.status = "draft"
 
         session.commit()
-
