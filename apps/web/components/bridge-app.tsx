@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { motion } from "framer-motion";
 import type {
   AgentDefinition,
@@ -53,6 +53,23 @@ const toolCatalog: Array<{ id: ToolName; label: string }> = [
   { id: "web", label: "Web" },
   { id: "api", label: "API" }
 ];
+
+const engineeringPanelStorageKey = "council-engineering-left-panel-width";
+const engineeringPanelDefaultWidth = 47.5;
+const engineeringPanelMinWidth = 32;
+const engineeringPanelMaxWidth = 62;
+const commandPanelStorageKey = "council-command-left-panel-width";
+const commandPanelDefaultWidth = 48;
+const commandPanelMinWidth = 34;
+const commandPanelMaxWidth = 62;
+
+function clampEngineeringPanelWidth(value: number): number {
+  return Math.min(engineeringPanelMaxWidth, Math.max(engineeringPanelMinWidth, value));
+}
+
+function clampCommandPanelWidth(value: number): number {
+  return Math.min(commandPanelMaxWidth, Math.max(commandPanelMinWidth, value));
+}
 
 function sortAgents(agents: AgentDefinition[]): AgentDefinition[] {
   return [...agents].sort((left, right) => left.name.localeCompare(right.name));
@@ -673,7 +690,7 @@ export function BridgeApp() {
             key={station}
             initial={{ opacity: 0, y: 18 }}
             animate={{ opacity: 1, y: 0 }}
-            className="panel panel-grid min-h-[72vh] rounded-[2rem] p-5"
+            className="panel panel-grid min-h-[72vh] min-w-0 rounded-[2rem] p-5"
           >
             {station === "command" ? (
               <CommandDeck
@@ -724,7 +741,7 @@ export function BridgeApp() {
             {station === "archive" ? <ArchiveStation replay={replay} missions={missions} /> : null}
           </motion.section>
 
-          <aside className="space-y-4">
+          <aside className="min-w-0 space-y-4">
             <section className="panel rounded-[2rem] p-5">
               <div className="mb-4 flex items-center justify-between">
                 <div>
@@ -846,9 +863,85 @@ function CommandDeck({
   onMissionRoute: (value: string) => void;
   onWorkflowChange: (workflowId: string | null) => void;
 }) {
+  const commandLayoutRef = useRef<HTMLDivElement | null>(null);
+  const [leftPanelWidth, setLeftPanelWidth] = useState<number>(() => {
+    if (typeof window === "undefined") {
+      return commandPanelDefaultWidth;
+    }
+    const stored = window.localStorage.getItem(commandPanelStorageKey);
+    const parsed = stored ? Number(stored) : Number.NaN;
+    return Number.isFinite(parsed) ? clampCommandPanelWidth(parsed) : commandPanelDefaultWidth;
+  });
+  const [isResizing, setIsResizing] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem(commandPanelStorageKey, String(leftPanelWidth));
+  }, [leftPanelWidth]);
+
+  useEffect(() => {
+    if (!isResizing) {
+      return;
+    }
+
+    const updateWidth = (clientX: number) => {
+      const rect = commandLayoutRef.current?.getBoundingClientRect();
+      if (!rect || rect.width <= 0) {
+        return;
+      }
+      const next = ((clientX - rect.left) / rect.width) * 100;
+      setLeftPanelWidth(clampCommandPanelWidth(next));
+    };
+
+    const handlePointerMove = (event: PointerEvent) => {
+      updateWidth(event.clientX);
+    };
+
+    const handlePointerUp = () => {
+      setIsResizing(false);
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+    };
+  }, [isResizing]);
+
+  const commandLayoutStyle = {
+    "--command-left-width": `minmax(0, ${leftPanelWidth}%)`,
+    "--command-right-width": `minmax(0, ${100 - leftPanelWidth}%)`,
+    "--command-divider-width": "1.5rem"
+  } as CSSProperties;
+
+  function beginResize(clientX: number) {
+    const rect = commandLayoutRef.current?.getBoundingClientRect();
+    if (rect && rect.width > 0) {
+      const next = ((clientX - rect.left) / rect.width) * 100;
+      setLeftPanelWidth(clampCommandPanelWidth(next));
+    }
+    setIsResizing(true);
+  }
+
+  function nudgeResize(delta: number) {
+    setLeftPanelWidth((current) => clampCommandPanelWidth(current + delta));
+  }
+
   return (
-    <div className="grid gap-5 lg:grid-cols-[0.95fr_1.05fr]">
-      <div className="space-y-5">
+    <div
+      ref={commandLayoutRef}
+      style={commandLayoutStyle}
+      className="grid gap-5 lg:grid-cols-[var(--command-left-width)_var(--command-divider-width)_var(--command-right-width)]"
+    >
+      <div data-testid="command-launch-panel" className="min-w-0 space-y-5">
         <div>
           <p className="panel-title text-cyan-300">Command Deck</p>
           <h2 className="mt-2 text-3xl font-semibold text-white">Launch and supervise missions</h2>
@@ -894,7 +987,54 @@ function CommandDeck({
         </button>
       </div>
 
-      <div className="panel rounded-[1.8rem] border border-white/8 bg-black/15 p-4">
+      <div className="hidden lg:flex items-stretch justify-center">
+        <button
+          type="button"
+          role="separator"
+          aria-label="Resize command deck panels"
+          aria-orientation="vertical"
+          aria-valuemin={commandPanelMinWidth}
+          aria-valuemax={commandPanelMaxWidth}
+          aria-valuenow={Math.round(leftPanelWidth)}
+          data-testid="command-resizer"
+          onPointerDown={(event) => {
+            event.preventDefault();
+            beginResize(event.clientX);
+          }}
+          onDoubleClick={() => setLeftPanelWidth(commandPanelDefaultWidth)}
+          onKeyDown={(event) => {
+            if (event.key === "ArrowLeft") {
+              event.preventDefault();
+              nudgeResize(-2);
+            }
+            if (event.key === "ArrowRight") {
+              event.preventDefault();
+              nudgeResize(2);
+            }
+            if (event.key === "Home") {
+              event.preventDefault();
+              setLeftPanelWidth(commandPanelMinWidth);
+            }
+            if (event.key === "End") {
+              event.preventDefault();
+              setLeftPanelWidth(commandPanelMaxWidth);
+            }
+          }}
+          className={`group relative flex h-full min-h-[42rem] w-6 cursor-col-resize items-center justify-center rounded-full border border-transparent transition ${
+            isResizing ? "border-cyan-300/40 bg-cyan-300/10" : "hover:border-cyan-300/20 hover:bg-cyan-300/5"
+          }`}
+        >
+          <span className="h-full w-px bg-cyan-300/18 transition group-hover:bg-cyan-200/40" />
+          <span className="absolute flex h-16 w-3 items-center justify-center rounded-full border border-cyan-300/20 bg-[rgba(5,18,31,0.92)]">
+            <span className="h-8 w-px bg-cyan-200/60 shadow-[0_0_10px_rgba(118,244,255,0.45)]" />
+          </span>
+        </button>
+      </div>
+
+      <div
+        data-testid="command-telemetry-panel"
+        className="panel min-w-0 rounded-[1.8rem] border border-white/8 bg-black/15 p-4"
+      >
         <div className="mb-3 flex items-center justify-between">
           <div>
             <p className="panel-title text-amber-300">Live Telemetry</p>
@@ -902,19 +1042,25 @@ function CommandDeck({
           </div>
           <div className="status-dot bg-cyan-300 text-cyan-300" />
         </div>
-        <div className="scroll-thin max-h-[34rem] space-y-3 overflow-auto pr-1">
+        <div
+          data-testid="command-telemetry-stream"
+          className="scroll-thin max-h-[34rem] space-y-3 overflow-y-auto overflow-x-hidden pr-1"
+        >
           {telemetry.map((event) => (
             <div
               key={event.id}
               data-testid={`telemetry-${event.type}`}
-              className="rounded-2xl border border-white/8 bg-black/20 p-3"
+              className="min-w-0 rounded-2xl border border-white/8 bg-black/20 p-3"
             >
-              <div className="flex items-center justify-between gap-3">
-                <strong className="text-sm text-white">{event.type}</strong>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <strong className="min-w-0 break-words text-sm text-white">{event.type}</strong>
                 <span className="text-xs uppercase tracking-[0.16em] text-slate-400">{event.severity}</span>
               </div>
-              <p className="mt-2 text-sm text-slate-300">{event.message}</p>
-              <pre className="mt-3 overflow-auto rounded-xl bg-black/30 p-3 text-xs text-cyan-100">
+              <p className="mt-2 break-words text-sm text-slate-300">{event.message}</p>
+              <pre
+                data-testid="telemetry-payload"
+                className="mt-3 max-w-full whitespace-pre-wrap break-words rounded-xl bg-black/30 p-3 text-xs text-cyan-100 [overflow-wrap:anywhere]"
+              >
                 {JSON.stringify(event.data, null, 2)}
               </pre>
             </div>
@@ -1156,6 +1302,77 @@ function EngineeringStation({
         0
       )
     : 0;
+  const engineeringLayoutRef = useRef<HTMLDivElement | null>(null);
+  const [leftPanelWidth, setLeftPanelWidth] = useState<number>(() => {
+    if (typeof window === "undefined") {
+      return engineeringPanelDefaultWidth;
+    }
+    const stored = window.localStorage.getItem(engineeringPanelStorageKey);
+    const parsed = stored ? Number(stored) : Number.NaN;
+    return Number.isFinite(parsed) ? clampEngineeringPanelWidth(parsed) : engineeringPanelDefaultWidth;
+  });
+  const [isResizing, setIsResizing] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem(engineeringPanelStorageKey, String(leftPanelWidth));
+  }, [leftPanelWidth]);
+
+  useEffect(() => {
+    if (!isResizing) {
+      return;
+    }
+
+    const updateWidth = (clientX: number) => {
+      const rect = engineeringLayoutRef.current?.getBoundingClientRect();
+      if (!rect || rect.width <= 0) {
+        return;
+      }
+      const next = ((clientX - rect.left) / rect.width) * 100;
+      setLeftPanelWidth(clampEngineeringPanelWidth(next));
+    };
+
+    const handlePointerMove = (event: PointerEvent) => {
+      updateWidth(event.clientX);
+    };
+
+    const handlePointerUp = () => {
+      setIsResizing(false);
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+    };
+  }, [isResizing]);
+
+  const engineeringLayoutStyle = {
+    "--engineering-left-width": `minmax(0, ${leftPanelWidth}%)`,
+    "--engineering-right-width": `minmax(0, ${100 - leftPanelWidth}%)`,
+    "--engineering-divider-width": "1.5rem"
+  } as CSSProperties;
+
+  function beginResize(clientX: number) {
+    const rect = engineeringLayoutRef.current?.getBoundingClientRect();
+    if (rect && rect.width > 0) {
+      const next = ((clientX - rect.left) / rect.width) * 100;
+      setLeftPanelWidth(clampEngineeringPanelWidth(next));
+    }
+    setIsResizing(true);
+  }
+
+  function nudgeResize(delta: number) {
+    setLeftPanelWidth((current) => clampEngineeringPanelWidth(current + delta));
+  }
 
   return (
     <div className="space-y-5">
@@ -1163,8 +1380,12 @@ function EngineeringStation({
         <p className="panel-title text-cyan-300">Engineering</p>
         <h2 className="mt-2 text-3xl font-semibold text-white">Agent forge, providers, and hard gates</h2>
       </div>
-      <div className="grid gap-4 xl:grid-cols-[0.95fr_1.05fr]">
-        <div className="rounded-[1.8rem] border border-white/10 bg-black/20 p-4">
+      <div
+        ref={engineeringLayoutRef}
+        style={engineeringLayoutStyle}
+        className="grid gap-4 xl:grid-cols-[var(--engineering-left-width)_var(--engineering-divider-width)_var(--engineering-right-width)]"
+      >
+        <div className="min-w-0 rounded-[1.8rem] border border-white/10 bg-black/20 p-4">
           <div className="flex items-center justify-between gap-3">
             <div>
               <p className="panel-title text-amber-300">Agent Registry</p>
@@ -1218,7 +1439,50 @@ function EngineeringStation({
             ) : null}
           </div>
         </div>
-        <div className="rounded-[1.8rem] border border-white/10 bg-black/20 p-4">
+        <div className="hidden xl:flex items-stretch justify-center">
+          <button
+            type="button"
+            role="separator"
+            aria-label="Resize engineering registry panel"
+            aria-orientation="vertical"
+            aria-valuemin={engineeringPanelMinWidth}
+            aria-valuemax={engineeringPanelMaxWidth}
+            aria-valuenow={Math.round(leftPanelWidth)}
+            data-testid="engineering-resizer"
+            onPointerDown={(event) => {
+              event.preventDefault();
+              beginResize(event.clientX);
+            }}
+            onDoubleClick={() => setLeftPanelWidth(engineeringPanelDefaultWidth)}
+            onKeyDown={(event) => {
+              if (event.key === "ArrowLeft") {
+                event.preventDefault();
+                nudgeResize(-2);
+              }
+              if (event.key === "ArrowRight") {
+                event.preventDefault();
+                nudgeResize(2);
+              }
+              if (event.key === "Home") {
+                event.preventDefault();
+                setLeftPanelWidth(engineeringPanelMinWidth);
+              }
+              if (event.key === "End") {
+                event.preventDefault();
+                setLeftPanelWidth(engineeringPanelMaxWidth);
+              }
+            }}
+            className={`group relative flex h-full min-h-[42rem] w-6 cursor-col-resize items-center justify-center rounded-full border border-transparent transition ${
+              isResizing ? "border-cyan-300/40 bg-cyan-300/10" : "hover:border-cyan-300/20 hover:bg-cyan-300/5"
+            }`}
+          >
+            <span className="h-full w-px bg-cyan-300/18 transition group-hover:bg-cyan-200/40" />
+            <span className="absolute flex h-16 w-3 items-center justify-center rounded-full border border-cyan-300/20 bg-[rgba(5,18,31,0.92)]">
+              <span className="h-8 w-px bg-cyan-200/60 shadow-[0_0_10px_rgba(118,244,255,0.45)]" />
+            </span>
+          </button>
+        </div>
+        <div className="min-w-0 rounded-[1.8rem] border border-white/10 bg-black/20 p-4">
           <div className="flex items-center justify-between gap-3">
             <div>
               <p className="panel-title text-cyan-300">Agent Forge</p>

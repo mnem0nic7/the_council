@@ -19,6 +19,14 @@ Starship Agent Mission Control is a monorepo for orchestrating and visualizing a
 
 The default operator account is `captain` / `bridge123`.
 
+## Cockpit UX
+
+- Engineering has a desktop-only draggable divider between the Agent Registry and Agent Forge.
+- Command Deck has a desktop-only draggable divider between mission launch controls and live telemetry.
+- Both resizers persist width locally per browser session, support keyboard nudging, and reset on double-click.
+- Command Deck telemetry payloads wrap in place so long JSON stays inside the panel instead of widening the page.
+- If a local Next.js build hits a stale-cache `/_document` failure, clear `apps/web/.next` and rebuild.
+
 ## Runtime Notes
 
 - Telemetry uses local websocket fanout by default and upgrades to Redis pub/sub automatically when `REDIS_URL` is reachable.
@@ -58,3 +66,11 @@ Useful deploy env vars:
 - `npm run test:runtime` runs the FastAPI runtime test suite.
 - `npm run test:e2e` runs the Playwright browser flow.
 - `npm run test:ci` runs the same sequence used by GitHub Actions.
+
+## Revision Workflow
+
+- Review the changed code before closing a revision.
+- Update [MEMORY.md](./MEMORY.md) and any affected documentation in the same change.
+- Update existing tests and add new coverage for changed behavior.
+- Run `npm run test:ci` and fix failures before commit.
+- Commit, push, and redeploy with `deploy/scripts/bluegreen.sh deploy`.
