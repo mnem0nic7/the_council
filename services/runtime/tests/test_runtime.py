@@ -551,19 +551,31 @@ def test_agent_crud_round_trip(client, auth_headers) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_path_traversal_blocked() -> None:
-    """7a: is_relative_to correctly rejects /tmp/foo from matching /tmp/foobar."""
-    from pathlib import Path
+@pytest.mark.asyncio
+async def test_path_traversal_blocked(tmp_path, monkeypatch) -> None:
+    """7a: ToolRunner raises ToolPolicyError when a path traversal is attempted."""
+    run_id = "test-traversal-run"
+    workspace = tmp_path / run_id
+    workspace.mkdir(parents=True)
 
-    root = Path("/tmp/foobar").resolve()
+    # Monkeypatch the cached settings instance so _mission_workspace uses tmp_path
+    from app.core.config import get_settings
 
-    # /tmp/foo/evil.txt is NOT inside /tmp/foobar
-    candidate = Path("/tmp/foo/evil.txt").resolve()
-    assert not candidate.is_relative_to(root)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "workspace_root", str(tmp_path))
 
-    # /tmp/foobar/file.txt IS inside /tmp/foobar
-    candidate2 = Path("/tmp/foobar/file.txt").resolve()
-    assert candidate2.is_relative_to(root)
+    runner = ToolRunner()
+    runner.settings = settings
+
+    policy = ToolPolicy(allowedTools=["filesystem"])
+
+    with pytest.raises(ToolPolicyError, match="outside mission writable roots"):
+        await runner.run(
+            "filesystem",
+            {"action": "read", "path": "../../etc/passwd"},
+            policy,
+            run_id,
+        )
 
 
 @pytest.mark.asyncio
@@ -625,10 +637,30 @@ def test_tool_output_not_truncated_when_short() -> None:
 
 @pytest.mark.asyncio
 async def test_provider_semaphore_limits_concurrency() -> None:
-    """7d: ProviderService initialises a semaphore from settings."""
+    """7d: ProviderService initialises a semaphore that limits to max_concurrent_llm_calls."""
+    import asyncio
+
     from app.core.config import get_settings
     from app.providers import ProviderService
 
     settings = get_settings()
     service = ProviderService()
-    assert service._semaphore._value == settings.max_concurrent_llm_calls
+
+    # Verify semaphore is created as asyncio.Semaphore
+    assert isinstance(service._semaphore, asyncio.Semaphore)
+
+    # Acquire max_concurrent_llm_calls times — all should succeed immediately
+    acquired = 0
+    for _ in range(settings.max_concurrent_llm_calls):
+        assert not service._semaphore.locked(), "Semaphore should not be locked yet"
+        await service._semaphore.acquire()
+        acquired += 1
+
+    # After acquiring max times, the semaphore is exhausted (locked)
+    assert service._semaphore.locked()
+
+    # Release all acquired slots
+    for _ in range(acquired):
+        service._semaphore.release()
+
+    assert not service._semaphore.locked()
