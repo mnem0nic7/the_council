@@ -184,3 +184,17 @@ class OperatorAction(Base):
     action: Mapped[str] = mapped_column(String)
     payload: Mapped[dict] = mapped_column(SQLiteJSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class NodeErrorRecord(Base):
+    __tablename__ = "node_errors"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    mission_id: Mapped[str] = mapped_column(String, index=True)
+    run_id: Mapped[str] = mapped_column(String, index=True)
+    node_id: Mapped[str] = mapped_column(String, index=True)
+    attempt: Mapped[int] = mapped_column(Integer)
+    error_type: Mapped[str] = mapped_column(String)
+    error_message: Mapped[str] = mapped_column(Text)
+    traceback: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

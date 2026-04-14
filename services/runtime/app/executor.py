@@ -13,7 +13,7 @@ from sqlalchemy import func, select
 from app.core.config import get_settings
 from app.db import SessionLocal
 from app.migrations import default_control_state
-from app.models import Artifact, MemoryRecord, Mission, MissionAgent, MissionRun, OperatorAction
+from app.models import Artifact, MemoryRecord, Mission, MissionAgent, MissionRun, NodeErrorRecord, OperatorAction
 from app.providers import ProviderService
 from app.schemas import MissionAgentDefinition, ProviderConfig, ToolPolicy, WorkflowDefinition, WorkflowNode
 from app.storage import ArtifactStorage
@@ -221,6 +221,86 @@ class MissionExecutor:
             await asyncio.sleep(0.25)
 
     async def _execute_node(
+        self,
+        run_id: str,
+        node: WorkflowNode,
+        results: dict[str, dict[str, Any]],
+    ) -> NodeResult:
+        retry_cfg = node.config.get("retry", {})
+        max_attempts = int(retry_cfg.get("maxAttempts", 1))
+        backoff_seconds = float(retry_cfg.get("backoffSeconds", 1))
+        backoff_multiplier = float(retry_cfg.get("backoffMultiplier", 2))
+        on_exhausted = retry_cfg.get("onExhausted", "fail")
+        fallback_node_id = node.config.get("fallbackNodeId")
+
+        last_exc: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return await self._execute_node_once(run_id, node, results)
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                # Record error in quarantine table
+                await self._record_node_error(run_id, node.id, attempt, exc)
+
+                if attempt < max_attempts:
+                    # Emit retry event
+                    with SessionLocal() as session:
+                        run = session.get(MissionRun, run_id)
+                        if run is not None:
+                            self.telemetry.persist_event(
+                                session,
+                                run.mission_id,
+                                run_id,
+                                "node.retry",
+                                f"{node.name} retry {attempt}/{max_attempts}: {exc}",
+                                node_id=node.id,
+                                severity="warning",
+                                data={"attempt": attempt, "maxAttempts": max_attempts, "error": str(exc)},
+                            )
+                    delay = backoff_seconds * (backoff_multiplier ** (attempt - 1))
+                    await asyncio.sleep(delay)
+                else:
+                    # Exhausted
+                    if on_exhausted == "skip":
+                        with SessionLocal() as session:
+                            run = session.get(MissionRun, run_id)
+                            if run is not None:
+                                self.telemetry.persist_event(
+                                    session,
+                                    run.mission_id,
+                                    run_id,
+                                    "node.skipped",
+                                    f"{node.name} skipped after {max_attempts} attempts: {exc}",
+                                    node_id=node.id,
+                                    severity="warning",
+                                    data={"skipped": True, "error": str(exc)},
+                                )
+                        return NodeResult(payload={"skipped": True, "error": str(last_exc)})
+                    elif on_exhausted == "fallback" and fallback_node_id:
+                        # Find the fallback node in the workflow and run it
+                        with SessionLocal() as session:
+                            run = session.get(MissionRun, run_id)
+                            if run is None:
+                                raise RuntimeError("Run not found")
+                            definition = WorkflowDefinition.model_validate(run.workflow_snapshot)
+                            fallback_node = next(
+                                (n for n in definition.nodes if n.id == fallback_node_id), None
+                            )
+                            if fallback_node is None:
+                                raise RuntimeError(f"Fallback node {fallback_node_id} not found")
+                        self.telemetry._schedule_dispatch(
+                            run_id,
+                            {"type": "node.fallback", "nodeId": node.id, "fallbackNodeId": fallback_node_id},
+                        )
+                        return await self._execute_node_once(run_id, fallback_node, results)
+                    else:
+                        # "fail" mode: re-raise original exception
+                        raise last_exc  # type: ignore[misc]
+
+        # Should never reach here
+        raise RuntimeError("Retry loop exited without returning or raising")
+
+    async def _execute_node_once(
         self,
         run_id: str,
         node: WorkflowNode,
@@ -532,6 +612,24 @@ class MissionExecutor:
                 content=content,
                 tags=tags,
                 metadata_json=metadata,
+            )
+            session.add(record)
+            session.commit()
+
+    async def _record_node_error(self, run_id: str, node_id: str, attempt: int, exc: Exception) -> None:
+        import traceback as tb
+        with SessionLocal() as session:
+            run = session.get(MissionRun, run_id)
+            if run is None:
+                return
+            record = NodeErrorRecord(
+                mission_id=run.mission_id,
+                run_id=run_id,
+                node_id=node_id,
+                attempt=attempt,
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+                traceback=tb.format_exc(),
             )
             session.add(record)
             session.commit()

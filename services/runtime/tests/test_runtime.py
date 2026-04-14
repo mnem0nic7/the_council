@@ -693,6 +693,172 @@ async def test_dispatch_stream_token_no_db_write() -> None:
     # No DB writes — no session was created
 
 
+# ---------------------------------------------------------------------------
+# Phase 9: Node-Level Retry & Error Handling tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_node_retry_then_succeed() -> None:
+    """9a: Node fails twice then succeeds on third attempt."""
+    from unittest.mock import MagicMock, patch
+
+    from app.executor import MissionExecutor, NodeResult
+    from app.schemas import WorkflowNode
+    from app.telemetry import TelemetryHub
+
+    telemetry = MagicMock(spec=TelemetryHub)
+    telemetry.persist_event = MagicMock(return_value=MagicMock())
+    telemetry._schedule_dispatch = MagicMock()
+    executor = MissionExecutor(telemetry)
+
+    call_count = 0
+
+    async def fake_execute_once(run_id, node, results):
+        nonlocal call_count
+        call_count += 1
+        if call_count < 3:
+            raise RuntimeError("temporary failure")
+        return NodeResult(payload={"output": "success"})
+
+    node = WorkflowNode(
+        id="n1",
+        name="Test Node",
+        type="agent",
+        position={"x": 0, "y": 0},
+        config={
+            "retry": {
+                "maxAttempts": 3,
+                "backoffSeconds": 0,  # no sleep in test
+                "backoffMultiplier": 1,
+                "onExhausted": "fail",
+            }
+        },
+    )
+
+    with patch.object(executor, "_execute_node_once", side_effect=fake_execute_once):
+        with patch("app.executor.SessionLocal") as mock_session_class:
+            session_mock = MagicMock()
+            mock_session_class.return_value.__enter__ = MagicMock(return_value=session_mock)
+            mock_session_class.return_value.__exit__ = MagicMock(return_value=False)
+            run_mock = MagicMock()
+            run_mock.mission_id = "m1"
+            run_mock.workflow_snapshot = {
+                "id": "wf1",
+                "name": "wf",
+                "version": 1,
+                "nodes": [{"id": "n1", "name": "Test Node", "type": "agent", "position": {"x": 0, "y": 0}}],
+                "edges": [],
+            }
+            session_mock.get.return_value = run_mock
+
+            result = await executor._execute_node("run-1", node, {})
+
+    assert call_count == 3
+    assert result.payload["output"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_node_retry_skip_on_exhaustion() -> None:
+    """9b: Node fails all retries and skips."""
+    from unittest.mock import MagicMock, patch
+
+    from app.executor import MissionExecutor, NodeResult
+    from app.schemas import WorkflowNode
+    from app.telemetry import TelemetryHub
+
+    telemetry = MagicMock(spec=TelemetryHub)
+    telemetry.persist_event = MagicMock(return_value=MagicMock())
+    telemetry._schedule_dispatch = MagicMock()
+    executor = MissionExecutor(telemetry)
+
+    node = WorkflowNode(
+        id="n1",
+        name="Failing Node",
+        type="agent",
+        position={"x": 0, "y": 0},
+        config={
+            "retry": {
+                "maxAttempts": 2,
+                "backoffSeconds": 0,
+                "backoffMultiplier": 1,
+                "onExhausted": "skip",
+            }
+        },
+    )
+
+    async def always_fail(run_id, node, results):
+        raise RuntimeError("always fails")
+
+    with patch.object(executor, "_execute_node_once", side_effect=always_fail):
+        with patch("app.executor.SessionLocal") as mock_session_class:
+            session_mock = MagicMock()
+            mock_session_class.return_value.__enter__ = MagicMock(return_value=session_mock)
+            mock_session_class.return_value.__exit__ = MagicMock(return_value=False)
+            run_mock = MagicMock()
+            run_mock.mission_id = "m1"
+            session_mock.get.return_value = run_mock
+
+            result = await executor._execute_node("run-1", node, {})
+
+    assert result.payload["skipped"] is True
+    assert "always fails" in result.payload["error"]
+
+
+@pytest.mark.asyncio
+async def test_node_error_records_written() -> None:
+    """9c: _record_node_error writes a NodeErrorRecord to the DB."""
+    from app.executor import MissionExecutor
+    from app.models import NodeErrorRecord
+    from app.telemetry import TelemetryHub
+
+    with SessionLocal() as session:
+        from app.models import Mission, MissionRun
+
+        mission = Mission(
+            id="m-err-test",
+            name="Error Record Mission",
+            description="",
+            status="running",
+            input_payload={},
+            output_payload={},
+            current_nodes=[],
+            provider_overrides={},
+            control_state={},
+            workflow_definition={"id": "wf", "name": "wf", "version": 1, "nodes": [], "edges": []},
+        )
+        session.add(mission)
+        run = MissionRun(
+            id="run-err-test",
+            mission_id="m-err-test",
+            name="Error Run",
+            status="running",
+            workflow_snapshot={"id": "wf", "name": "wf", "version": 1, "nodes": [], "edges": []},
+        )
+        session.add(run)
+        session.commit()
+
+    from unittest.mock import MagicMock
+
+    telemetry = MagicMock(spec=TelemetryHub)
+    executor = MissionExecutor(telemetry)
+
+    exc = ValueError("something went wrong")
+    await executor._record_node_error("run-err-test", "node-x", 2, exc)
+
+    with SessionLocal() as session:
+        records = session.query(NodeErrorRecord).filter_by(run_id="run-err-test").all()
+
+    assert len(records) == 1
+    rec = records[0]
+    assert rec.mission_id == "m-err-test"
+    assert rec.node_id == "node-x"
+    assert rec.attempt == 2
+    assert rec.error_type == "ValueError"
+    assert rec.error_message == "something went wrong"
+    assert rec.traceback is not None
+
+
 @pytest.mark.asyncio
 async def test_provider_semaphore_limits_concurrency() -> None:
     """7d: ProviderService initialises a semaphore that limits to max_concurrent_llm_calls."""
