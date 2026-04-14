@@ -10,7 +10,7 @@ export function TelemetryEventCard({ event }: { event: TelemetryEvent }) {
   }[event.severity] ?? "text-cyan-400";
 
   return (
-    <div className="border-b border-gray-700/50 py-1.5 px-2">
+    <div className="border-b border-gray-700/50 py-1.5 px-2" data-testid={`telemetry-${event.type}`}>
       <div className="flex items-start gap-2">
         <span className={`text-xs font-mono shrink-0 ${severityColor}`}>
           [{event.sequence.toString().padStart(3, "0")}]
