@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import logging
 import re
+import traceback
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -19,6 +21,8 @@ from app.schemas import MissionAgentDefinition, ProviderConfig, ToolPolicy, Work
 from app.storage import ArtifactStorage
 from app.telemetry import TelemetryHub
 from app.tools import ToolPolicyError, ToolRunner
+
+logger = logging.getLogger(__name__)
 
 TEMPLATE_PATTERN = re.compile(r"{{\s*([^}]+)\s*}}")
 ACTIVE_RUN_STATUSES = {"queued", "running", "paused", "awaiting_input"}
@@ -294,6 +298,11 @@ class MissionExecutor:
                         )
                         return await self._execute_node_once(run_id, fallback_node, results)
                     else:
+                        if on_exhausted == "fallback":
+                            logger.warning(
+                                "Node %s configured onExhausted=fallback but fallbackNodeId is missing; failing instead",
+                                node.id,
+                            )
                         # "fail" mode: re-raise original exception
                         raise last_exc  # type: ignore[misc]
 
@@ -617,7 +626,6 @@ class MissionExecutor:
             session.commit()
 
     async def _record_node_error(self, run_id: str, node_id: str, attempt: int, exc: Exception) -> None:
-        import traceback as tb
         with SessionLocal() as session:
             run = session.get(MissionRun, run_id)
             if run is None:
@@ -629,7 +637,7 @@ class MissionExecutor:
                 attempt=attempt,
                 error_type=type(exc).__name__,
                 error_message=str(exc),
-                traceback=tb.format_exc(),
+                traceback=traceback.format_exc(),
             )
             session.add(record)
             session.commit()
