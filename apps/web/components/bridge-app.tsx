@@ -1163,7 +1163,7 @@ function EngineeringStation({
         <p className="panel-title text-cyan-300">Engineering</p>
         <h2 className="mt-2 text-3xl font-semibold text-white">Agent forge, providers, and hard gates</h2>
       </div>
-      <div className="grid gap-4 xl:grid-cols-[0.78fr_1.22fr]">
+      <div className="grid gap-4 xl:grid-cols-[0.95fr_1.05fr]">
         <div className="rounded-[1.8rem] border border-white/10 bg-black/20 p-4">
           <div className="flex items-center justify-between gap-3">
             <div>
