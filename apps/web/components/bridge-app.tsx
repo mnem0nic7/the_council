@@ -44,6 +44,8 @@ import { TacticalStation } from "./stations/tactical-station";
 import { StationTabs } from "./station-tabs";
 import { type StationId } from "../lib/store";
 import { CockpitScene } from "./cockpit-scene";
+import { useStationRouter } from "../lib/hooks/use-station-router";
+import { useMediaQuery } from "../lib/hooks/use-media-query";
 
 export function BridgeApp() {
   const {
@@ -98,6 +100,13 @@ export function BridgeApp() {
 
   // Track the last mission id for which editors were initialized
   const editorInitMissionRef = useRef<string | null>(null);
+
+  // URL-based routing: syncs station/mission/run with browser history
+  useStationRouter();
+
+  // Accessibility: reduced motion and mobile detection for CockpitScene
+  const reducedMotion = useMediaQuery("(prefers-reduced-motion: reduce)");
+  const isMobile = useMediaQuery("(max-width: 768px)");
 
   // Delegate data fetching to hooks
   useBridgeData({ token, selectedMissionId, selectedRunId });
@@ -619,7 +628,7 @@ export function BridgeApp() {
 
   return (
     <main className="relative min-h-screen overflow-hidden">
-      <CockpitScene />
+      {!reducedMotion && !isMobile && <CockpitScene />}
       <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(118,244,255,0.09),transparent_34%),linear-gradient(180deg,rgba(2,8,18,0.2),rgba(2,8,18,0.82))]" />
 
       <div className="relative z-10 min-h-screen p-4 md:p-6">
@@ -645,79 +654,85 @@ export function BridgeApp() {
             animate={{ opacity: 1, y: 0 }}
             className="panel panel-grid min-h-[72vh] min-w-0 rounded-[2rem] p-5"
           >
-            {station === "command" ? (
-              <CommandDeck
-                busy={busy}
-                missionDraft={missionDraft}
-                selectedMission={selectedMission}
-                selectedRun={selectedRun}
-                telemetry={telemetry}
-                templateWorkflows={templateWorkflows}
-                awaitingInputPrompt={awaitingInputPrompt}
-                onPatchDraft={patchMissionDraft}
-                onCreateMission={() => void createMission()}
-                onSaveMission={() => void saveMissionWorkspace()}
-                onLaunchRun={() => void launchRun()}
-                onProvideInput={(input) => handleProvideInput(input)}
-              />
-            ) : null}
-            {station === "tactical" ? (
-              <TacticalStation
-                busy={busy}
-                mission={selectedMission}
-                workflow={workflowDraft}
-                workflowJson={workflowJson}
-                missionAgents={missionAgents}
-                editsAllowed={structuralEditsAllowed}
-                newNodeType={newNodeType}
-                selectedNodeId={selectedWorkflowNodeId}
-                onNewNodeType={setNewNodeType}
-                onUpdateWorkflow={updateWorkflow}
-                onPatchNode={patchWorkflowNode}
-                onPatchEdge={patchWorkflowEdge}
-                onRemoveNode={removeWorkflowNode}
-                onRemoveEdge={removeWorkflowEdge}
-                onAddNode={addWorkflowNode}
-                onAddEdge={addWorkflowEdge}
-                onSelectNode={setSelectedWorkflowNodeId}
-                onJsonChange={handleWorkflowJsonChange}
-                onSave={() => void saveMissionWorkflow()}
-              />
-            ) : null}
-            {station === "crew" ? (
-              <CrewStation
-                mission={selectedMission}
-                run={selectedRun}
-                missionAgents={missionAgents}
-                telemetry={telemetry}
-                agentTelemetry={agentTelemetry}
-              />
-            ) : null}
-            {station === "engineering" ? (
-              <EngineeringStation
-                settings={settings}
-                mission={selectedMission}
-                missionAgents={missionAgents}
-                templateAgents={templateAgents}
-                busy={busy}
-                editor={missionAgentEditor}
-                editorMode={missionAgentEditorMode}
-                selectedMissionAgentId={selectedMissionAgentId}
-                importTemplateId={importTemplateId}
-                editsAllowed={structuralEditsAllowed}
-                onSelectMissionAgent={selectMissionAgent}
-                onStartCreate={startMissionAgentCreate}
-                onEditorChange={patchMissionAgentEditor}
-                onToggleTool={toggleMissionAgentTool}
-                onSave={() => void saveMissionAgent()}
-                onDelete={() => void deleteMissionAgent()}
-                onImportTemplateChange={setImportTemplateId}
-                onImportTemplate={() => void importTemplateAgent()}
-              />
-            ) : null}
-            {station === "archive" ? (
-              <ArchiveStation replay={replay} mission={selectedMission} run={selectedRun} />
-            ) : null}
+            <div
+              id={`station-panel-${station}`}
+              role="tabpanel"
+              aria-labelledby={`station-tab-${station}`}
+            >
+              {station === "command" ? (
+                <CommandDeck
+                  busy={busy}
+                  missionDraft={missionDraft}
+                  selectedMission={selectedMission}
+                  selectedRun={selectedRun}
+                  telemetry={telemetry}
+                  templateWorkflows={templateWorkflows}
+                  awaitingInputPrompt={awaitingInputPrompt}
+                  onPatchDraft={patchMissionDraft}
+                  onCreateMission={() => void createMission()}
+                  onSaveMission={() => void saveMissionWorkspace()}
+                  onLaunchRun={() => void launchRun()}
+                  onProvideInput={(input) => handleProvideInput(input)}
+                />
+              ) : null}
+              {station === "tactical" ? (
+                <TacticalStation
+                  busy={busy}
+                  mission={selectedMission}
+                  workflow={workflowDraft}
+                  workflowJson={workflowJson}
+                  missionAgents={missionAgents}
+                  editsAllowed={structuralEditsAllowed}
+                  newNodeType={newNodeType}
+                  selectedNodeId={selectedWorkflowNodeId}
+                  onNewNodeType={setNewNodeType}
+                  onUpdateWorkflow={updateWorkflow}
+                  onPatchNode={patchWorkflowNode}
+                  onPatchEdge={patchWorkflowEdge}
+                  onRemoveNode={removeWorkflowNode}
+                  onRemoveEdge={removeWorkflowEdge}
+                  onAddNode={addWorkflowNode}
+                  onAddEdge={addWorkflowEdge}
+                  onSelectNode={setSelectedWorkflowNodeId}
+                  onJsonChange={handleWorkflowJsonChange}
+                  onSave={() => void saveMissionWorkflow()}
+                />
+              ) : null}
+              {station === "crew" ? (
+                <CrewStation
+                  mission={selectedMission}
+                  run={selectedRun}
+                  missionAgents={missionAgents}
+                  telemetry={telemetry}
+                  agentTelemetry={agentTelemetry}
+                />
+              ) : null}
+              {station === "engineering" ? (
+                <EngineeringStation
+                  settings={settings}
+                  mission={selectedMission}
+                  missionAgents={missionAgents}
+                  templateAgents={templateAgents}
+                  busy={busy}
+                  editor={missionAgentEditor}
+                  editorMode={missionAgentEditorMode}
+                  selectedMissionAgentId={selectedMissionAgentId}
+                  importTemplateId={importTemplateId}
+                  editsAllowed={structuralEditsAllowed}
+                  onSelectMissionAgent={selectMissionAgent}
+                  onStartCreate={startMissionAgentCreate}
+                  onEditorChange={patchMissionAgentEditor}
+                  onToggleTool={toggleMissionAgentTool}
+                  onSave={() => void saveMissionAgent()}
+                  onDelete={() => void deleteMissionAgent()}
+                  onImportTemplateChange={setImportTemplateId}
+                  onImportTemplate={() => void importTemplateAgent()}
+                />
+              ) : null}
+              {station === "archive" ? (
+                <ArchiveStation replay={replay} mission={selectedMission} run={selectedRun} />
+              ) : null}
+            </div>
           </motion.section>
 
           <aside className="min-w-0 space-y-4">
