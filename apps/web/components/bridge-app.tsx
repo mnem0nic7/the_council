@@ -3,8 +3,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import type {
+  AgentDefinition,
   MissionAction,
+  RuntimeSettings,
   TelemetryEvent,
+  ToolName,
+  ToolPolicy,
   WorkflowDefinition
 } from "@the-council/contracts";
 
@@ -27,6 +31,176 @@ type LoginState = {
   username: string;
   password: string;
 };
+
+type AgentEditorState = {
+  id: string;
+  name: string;
+  role: string;
+  description: string;
+  systemPrompt: string;
+  providerId: string;
+  tools: ToolName[];
+  handoffTargets: string;
+  memoryMode: AgentDefinition["memoryProfile"]["mode"];
+  memoryNamespace: string;
+  memoryTopK: string;
+  toolPolicyJson: string;
+};
+
+const toolCatalog: Array<{ id: ToolName; label: string }> = [
+  { id: "shell", label: "Shell" },
+  { id: "filesystem", label: "Filesystem" },
+  { id: "web", label: "Web" },
+  { id: "api", label: "API" }
+];
+
+function sortAgents(agents: AgentDefinition[]): AgentDefinition[] {
+  return [...agents].sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function nextAgentId(agents: AgentDefinition[]): string {
+  let index = agents.length + 1;
+  let candidate = `agent-${index}`;
+  while (agents.some((agent) => agent.id === candidate)) {
+    index += 1;
+    candidate = `agent-${index}`;
+  }
+  return candidate;
+}
+
+function defaultToolPolicy(settings: RuntimeSettings | null, tools: ToolName[]): ToolPolicy {
+  if (settings) {
+    return {
+      ...settings.defaultPolicy,
+      allowedTools: tools
+    };
+  }
+
+  return {
+    allowedTools: tools,
+    domainAllowlist: [],
+    shellAllowlist: [],
+    shellDenylist: [],
+    writableRoots: [],
+    maxRuntimeSeconds: 300,
+    maxArtifacts: 20,
+    maxTokens: 4000
+  };
+}
+
+function syncToolPolicyJson(policyJson: string, settings: RuntimeSettings | null, tools: ToolName[]): string {
+  let policy = defaultToolPolicy(settings, tools);
+  try {
+    const parsed = JSON.parse(policyJson) as Partial<ToolPolicy>;
+    policy = {
+      ...policy,
+      ...parsed,
+      allowedTools: tools
+    };
+  } catch {
+    policy = defaultToolPolicy(settings, tools);
+  }
+
+  return JSON.stringify(policy, null, 2);
+}
+
+function buildAgentEditorState(agent: AgentDefinition): AgentEditorState {
+  return {
+    id: agent.id,
+    name: agent.name,
+    role: agent.role,
+    description: agent.description,
+    systemPrompt: agent.systemPrompt,
+    providerId: agent.provider.id,
+    tools: agent.tools,
+    handoffTargets: agent.handoffTargets.join(", "),
+    memoryMode: agent.memoryProfile.mode,
+    memoryNamespace: agent.memoryProfile.namespace,
+    memoryTopK: String(agent.memoryProfile.topK),
+    toolPolicyJson: JSON.stringify(agent.toolPolicy, null, 2)
+  };
+}
+
+function buildNewAgentEditorState(
+  settings: RuntimeSettings | null,
+  agents: AgentDefinition[]
+): AgentEditorState {
+  const providerId = settings?.providers[0]?.id ?? "";
+  const tools: ToolName[] = [];
+
+  return {
+    id: nextAgentId(agents),
+    name: "",
+    role: "",
+    description: "",
+    systemPrompt: "",
+    providerId,
+    tools,
+    handoffTargets: "",
+    memoryMode: "hybrid",
+    memoryNamespace: settings?.storage.memoryNamespace ?? "bridge",
+    memoryTopK: "5",
+    toolPolicyJson: JSON.stringify(defaultToolPolicy(settings, tools), null, 2)
+  };
+}
+
+function toAgentDefinition(
+  editor: AgentEditorState,
+  settings: RuntimeSettings,
+  existing?: AgentDefinition
+): AgentDefinition {
+  const provider = settings.providers.find((entry) => entry.id === editor.providerId) ?? settings.providers[0];
+  if (!provider) {
+    throw new Error("No providers configured for this bridge.");
+  }
+
+  const id = editor.id.trim();
+  const name = editor.name.trim();
+  const role = editor.role.trim();
+  const systemPrompt = editor.systemPrompt.trim();
+  if (!id || !name || !role || !systemPrompt) {
+    throw new Error("Agent id, name, role, and system prompt are required.");
+  }
+
+  let parsedPolicy = defaultToolPolicy(settings, editor.tools);
+  try {
+    const policyCandidate = JSON.parse(editor.toolPolicyJson) as Partial<ToolPolicy>;
+    parsedPolicy = {
+      ...parsedPolicy,
+      ...policyCandidate,
+      allowedTools: editor.tools
+    };
+  } catch {
+    throw new Error("Tool policy must be valid JSON.");
+  }
+
+  const topK = Number(editor.memoryTopK);
+  if (!Number.isFinite(topK) || topK <= 0) {
+    throw new Error("Memory recall depth must be a positive number.");
+  }
+
+  return {
+    id,
+    name,
+    role,
+    description: editor.description.trim(),
+    systemPrompt,
+    provider,
+    tools: editor.tools,
+    toolPolicy: parsedPolicy,
+    memoryProfile: {
+      mode: editor.memoryMode,
+      namespace: editor.memoryNamespace.trim() || settings.storage.memoryNamespace,
+      topK: Math.round(topK)
+    },
+    handoffTargets: editor.handoffTargets
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean),
+    createdAt: existing?.createdAt,
+    updatedAt: existing?.updatedAt
+  };
+}
 
 export function BridgeApp() {
   const {
@@ -63,6 +237,9 @@ export function BridgeApp() {
   const [missionRoute, setMissionRoute] = useState("analysis");
   const [retaskNote, setRetaskNote] = useState("");
   const [jsonEditor, setJsonEditor] = useState("");
+  const [agentEditorMode, setAgentEditorMode] = useState<"create" | "edit">("create");
+  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
+  const [agentEditor, setAgentEditor] = useState<AgentEditorState | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -176,6 +353,21 @@ export function BridgeApp() {
     void refreshMissionArtifacts(authToken, missionId);
   }, [activeMissionId, token]);
 
+  useEffect(() => {
+    if (!settings || agentEditor) {
+      return;
+    }
+    if (agents.length > 0) {
+      setSelectedAgentId(agents[0].id);
+      setAgentEditorMode("edit");
+      setAgentEditor(buildAgentEditorState(agents[0]));
+      return;
+    }
+    setSelectedAgentId(null);
+    setAgentEditorMode("create");
+    setAgentEditor(buildNewAgentEditorState(settings, agents));
+  }, [agentEditor, agents, settings]);
+
   async function handleLogin() {
     setBusy("login");
     setError(null);
@@ -249,6 +441,120 @@ export function BridgeApp() {
       setActiveWorkflow(saved.id);
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "Save failed");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  function patchAgentEditor(patch: Partial<AgentEditorState>) {
+    setAgentEditor((current) => (current ? { ...current, ...patch } : current));
+  }
+
+  function selectAgent(agentId: string) {
+    const agent = agents.find((entry) => entry.id === agentId);
+    if (!agent) {
+      return;
+    }
+    setSelectedAgentId(agent.id);
+    setAgentEditorMode("edit");
+    setAgentEditor(buildAgentEditorState(agent));
+    setError(null);
+  }
+
+  function startAgentCreate() {
+    if (!settings) {
+      return;
+    }
+    setSelectedAgentId(null);
+    setAgentEditorMode("create");
+    setAgentEditor(buildNewAgentEditorState(settings, agents));
+    setError(null);
+  }
+
+  function toggleAgentTool(tool: ToolName) {
+    setAgentEditor((current) => {
+      if (!current) {
+        return current;
+      }
+      const nextTools = current.tools.includes(tool)
+        ? current.tools.filter((entry) => entry !== tool)
+        : [...current.tools, tool];
+      const tools = [...nextTools].sort() as ToolName[];
+      return {
+        ...current,
+        tools,
+        toolPolicyJson: syncToolPolicyJson(current.toolPolicyJson, settings, tools)
+      };
+    });
+  }
+
+  async function saveAgent() {
+    if (!token || !settings || !agentEditor) {
+      return;
+    }
+    const authToken = token;
+    setBusy("save-agent");
+    setError(null);
+    try {
+      const existing = selectedAgentId ? agents.find((agent) => agent.id === selectedAgentId) : undefined;
+      if (agentEditorMode === "edit" && existing && agentEditor.id.trim() !== existing.id) {
+        throw new Error("Agent id cannot be changed after creation.");
+      }
+      const payload = toAgentDefinition(agentEditor, settings, existing);
+      let saved: AgentDefinition;
+
+      if (agentEditorMode === "edit" && existing) {
+        saved = await api.updateAgent(authToken, existing.id, payload);
+      } else {
+        if (agents.some((agent) => agent.id === payload.id)) {
+          throw new Error(`Agent id "${payload.id}" is already registered.`);
+        }
+        saved = await api.createAgent(authToken, payload);
+      }
+
+      const nextAgents = sortAgents(
+        agentEditorMode === "edit" && existing
+          ? agents.map((agent) => (agent.id === existing.id ? saved : agent))
+          : [...agents, saved]
+      );
+      setAgents(nextAgents);
+      setSelectedAgentId(saved.id);
+      setAgentEditorMode("edit");
+      setAgentEditor(buildAgentEditorState(saved));
+    } catch (agentError) {
+      setError(agentError instanceof Error ? agentError.message : "Agent save failed");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function deleteAgent() {
+    if (!token || !selectedAgentId) {
+      return;
+    }
+    const authToken = token;
+    setBusy("delete-agent");
+    setError(null);
+    try {
+      await api.deleteAgent(authToken, selectedAgentId);
+      const nextAgents = agents.filter((agent) => agent.id !== selectedAgentId);
+      setAgents(nextAgents);
+
+      if (nextAgents.length > 0) {
+        setSelectedAgentId(nextAgents[0].id);
+        setAgentEditorMode("edit");
+        setAgentEditor(buildAgentEditorState(nextAgents[0]));
+      } else if (settings) {
+        setSelectedAgentId(null);
+        setAgentEditorMode("create");
+        setAgentEditor(buildNewAgentEditorState(settings, []));
+      } else {
+        setSelectedAgentId(null);
+        setAgentEditorMode("create");
+        setAgentEditor(null);
+      }
+    } catch (agentError) {
+      setError(agentError instanceof Error ? agentError.message : "Agent delete failed");
     } finally {
       setBusy(null);
     }
@@ -398,7 +704,22 @@ export function BridgeApp() {
               <CrewStation agentMap={agentMap} missions={missions} telemetry={telemetry} />
             ) : null}
             {station === "engineering" ? (
-              <EngineeringStation settings={settings} activeMission={activeMission} />
+              <EngineeringStation
+                settings={settings}
+                activeMission={activeMission}
+                agents={agents}
+                workflows={workflows}
+                busy={busy}
+                editor={agentEditor}
+                editorMode={agentEditorMode}
+                selectedAgentId={selectedAgentId}
+                onSelectAgent={selectAgent}
+                onStartCreate={startAgentCreate}
+                onEditorChange={patchAgentEditor}
+                onToggleTool={toggleAgentTool}
+                onSave={() => void saveAgent()}
+                onDelete={() => void deleteAgent()}
+              />
             ) : null}
             {station === "archive" ? <ArchiveStation replay={replay} missions={missions} /> : null}
           </motion.section>
@@ -797,22 +1118,313 @@ function CrewStation({
 
 function EngineeringStation({
   settings,
-  activeMission
+  activeMission,
+  agents,
+  workflows,
+  busy,
+  editor,
+  editorMode,
+  selectedAgentId,
+  onSelectAgent,
+  onStartCreate,
+  onEditorChange,
+  onToggleTool,
+  onSave,
+  onDelete
 }: {
-  settings: Record<string, any> | null;
+  settings: RuntimeSettings | null;
   activeMission?: { controlState: Record<string, any> };
+  agents: AgentDefinition[];
+  workflows: WorkflowDefinition[];
+  busy: string | null;
+  editor: AgentEditorState | null;
+  editorMode: "create" | "edit";
+  selectedAgentId: string | null;
+  onSelectAgent: (agentId: string) => void;
+  onStartCreate: () => void;
+  onEditorChange: (patch: Partial<AgentEditorState>) => void;
+  onToggleTool: (tool: ToolName) => void;
+  onSave: () => void;
+  onDelete: () => void;
 }) {
+  const selectedProvider =
+    settings?.providers.find((provider) => provider.id === editor?.providerId) ?? settings?.providers[0];
+  const workflowReferenceCount = selectedAgentId
+    ? workflows.reduce(
+        (count, workflow) =>
+          count + workflow.nodes.filter((node) => node.config?.agentId === selectedAgentId).length,
+        0
+      )
+    : 0;
+
   return (
     <div className="space-y-5">
       <div>
         <p className="panel-title text-cyan-300">Engineering</p>
-        <h2 className="mt-2 text-3xl font-semibold text-white">Providers, policies, and hard gates</h2>
+        <h2 className="mt-2 text-3xl font-semibold text-white">Agent forge, providers, and hard gates</h2>
+      </div>
+      <div className="grid gap-4 xl:grid-cols-[0.78fr_1.22fr]">
+        <div className="rounded-[1.8rem] border border-white/10 bg-black/20 p-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="panel-title text-amber-300">Agent Registry</p>
+              <h3 className="mt-2 text-lg text-white">Crew manifest and selection</h3>
+            </div>
+            <button
+              type="button"
+              onClick={onStartCreate}
+              data-testid="agent-new"
+              className="rounded-full border border-cyan-300/30 bg-cyan-300/10 px-4 py-2 text-xs uppercase tracking-[0.18em] text-cyan-100 transition hover:border-cyan-200 hover:bg-cyan-200/15"
+            >
+              New Agent
+            </button>
+          </div>
+          <div className="scroll-thin mt-4 max-h-[39rem] space-y-3 overflow-auto pr-1">
+            {agents.map((agent) => (
+              <button
+                key={agent.id}
+                type="button"
+                onClick={() => onSelectAgent(agent.id)}
+                data-testid={`agent-card-${agent.id}`}
+                className={`w-full rounded-2xl border p-3 text-left transition ${
+                  selectedAgentId === agent.id
+                    ? "border-cyan-300/60 bg-cyan-300/10"
+                    : "border-white/8 bg-black/10 hover:border-cyan-300/30"
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <strong className="text-white">{agent.name}</strong>
+                  <span className="text-xs uppercase tracking-[0.16em] text-slate-400">
+                    {agent.role}
+                  </span>
+                </div>
+                <p className="mt-2 text-xs text-slate-500">{agent.id}</p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {agent.tools.map((tool) => (
+                    <span
+                      key={tool}
+                      className="rounded-full border border-white/10 px-2.5 py-1 text-[11px] uppercase tracking-[0.16em] text-cyan-200"
+                    >
+                      {tool}
+                    </span>
+                  ))}
+                </div>
+              </button>
+            ))}
+            {agents.length === 0 ? (
+              <p className="rounded-2xl border border-dashed border-white/10 p-4 text-sm text-slate-400">
+                No agents registered yet. Forge the first operator below.
+              </p>
+            ) : null}
+          </div>
+        </div>
+        <div className="rounded-[1.8rem] border border-white/10 bg-black/20 p-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="panel-title text-cyan-300">Agent Forge</p>
+              <h3 className="mt-2 text-lg text-white">
+                {editorMode === "create" ? "Create a new operator" : "Edit selected operator"}
+              </h3>
+            </div>
+            <div className="rounded-full border border-amber-300/20 bg-amber-300/10 px-3 py-1 text-xs uppercase tracking-[0.18em] text-amber-100">
+              {editorMode === "create" ? "new record" : "persisted record"}
+            </div>
+          </div>
+          {editor ? (
+            <div data-testid="agent-editor" className="mt-4 space-y-4">
+              <div className="grid gap-4 lg:grid-cols-2">
+                <label className="block">
+                  <span className="mb-2 block text-xs uppercase tracking-[0.2em] text-slate-400">Agent ID</span>
+                  <input
+                    value={editor.id}
+                    disabled={editorMode === "edit"}
+                    onChange={(event) => onEditorChange({ id: event.target.value })}
+                    data-testid="agent-id"
+                    className="w-full rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-white outline-none transition focus:border-cyan-300/50 disabled:cursor-not-allowed disabled:opacity-60"
+                  />
+                </label>
+                <label className="block">
+                  <span className="mb-2 block text-xs uppercase tracking-[0.2em] text-slate-400">Call Sign</span>
+                  <input
+                    value={editor.name}
+                    onChange={(event) => onEditorChange({ name: event.target.value })}
+                    data-testid="agent-name"
+                    className="w-full rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-white outline-none transition focus:border-cyan-300/50"
+                  />
+                </label>
+                <label className="block">
+                  <span className="mb-2 block text-xs uppercase tracking-[0.2em] text-slate-400">Duty Role</span>
+                  <input
+                    value={editor.role}
+                    onChange={(event) => onEditorChange({ role: event.target.value })}
+                    data-testid="agent-role"
+                    className="w-full rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-white outline-none transition focus:border-cyan-300/50"
+                  />
+                </label>
+                <label className="block">
+                  <span className="mb-2 block text-xs uppercase tracking-[0.2em] text-slate-400">Provider</span>
+                  <select
+                    value={editor.providerId}
+                    onChange={(event) => onEditorChange({ providerId: event.target.value })}
+                    data-testid="agent-provider"
+                    className="w-full rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-white outline-none transition focus:border-cyan-300/50"
+                  >
+                    {settings?.providers.map((provider) => (
+                      <option key={provider.id} value={provider.id}>
+                        {provider.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+
+              <label className="block">
+                <span className="mb-2 block text-xs uppercase tracking-[0.2em] text-slate-400">Description</span>
+                <textarea
+                  value={editor.description}
+                  onChange={(event) => onEditorChange({ description: event.target.value })}
+                  className="min-h-20 w-full rounded-[1.5rem] border border-white/10 bg-black/20 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-cyan-300/50"
+                />
+              </label>
+
+              <label className="block">
+                <span className="mb-2 block text-xs uppercase tracking-[0.2em] text-slate-400">System Prompt</span>
+                <textarea
+                  value={editor.systemPrompt}
+                  onChange={(event) => onEditorChange({ systemPrompt: event.target.value })}
+                  data-testid="agent-system-prompt"
+                  className="min-h-32 w-full rounded-[1.5rem] border border-white/10 bg-black/20 px-4 py-4 text-sm leading-6 text-slate-100 outline-none transition focus:border-cyan-300/50"
+                />
+              </label>
+
+              <div>
+                <span className="mb-2 block text-xs uppercase tracking-[0.2em] text-slate-400">Tool Access</span>
+                <div className="flex flex-wrap gap-2">
+                  {toolCatalog.map((tool) => {
+                    const enabled = editor.tools.includes(tool.id);
+                    return (
+                      <button
+                        key={tool.id}
+                        type="button"
+                        onClick={() => onToggleTool(tool.id)}
+                        data-testid={`agent-tool-${tool.id}`}
+                        className={`rounded-full border px-3 py-2 text-xs uppercase tracking-[0.18em] transition ${
+                          enabled
+                            ? "border-cyan-300/60 bg-cyan-300/10 text-cyan-100"
+                            : "border-white/10 bg-black/20 text-slate-400 hover:border-cyan-300/30"
+                        }`}
+                      >
+                        {tool.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="grid gap-4 lg:grid-cols-3">
+                <label className="block">
+                  <span className="mb-2 block text-xs uppercase tracking-[0.2em] text-slate-400">Memory Mode</span>
+                  <select
+                    value={editor.memoryMode}
+                    onChange={(event) =>
+                      onEditorChange({
+                        memoryMode: event.target.value as AgentEditorState["memoryMode"]
+                      })
+                    }
+                    className="w-full rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-white outline-none transition focus:border-cyan-300/50"
+                  >
+                    <option value="session">session</option>
+                    <option value="long_term">long_term</option>
+                    <option value="hybrid">hybrid</option>
+                  </select>
+                </label>
+                <label className="block">
+                  <span className="mb-2 block text-xs uppercase tracking-[0.2em] text-slate-400">Memory Namespace</span>
+                  <input
+                    value={editor.memoryNamespace}
+                    onChange={(event) => onEditorChange({ memoryNamespace: event.target.value })}
+                    className="w-full rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-white outline-none transition focus:border-cyan-300/50"
+                  />
+                </label>
+                <label className="block">
+                  <span className="mb-2 block text-xs uppercase tracking-[0.2em] text-slate-400">Recall Depth</span>
+                  <input
+                    type="number"
+                    min={1}
+                    value={editor.memoryTopK}
+                    onChange={(event) => onEditorChange({ memoryTopK: event.target.value })}
+                    className="w-full rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-white outline-none transition focus:border-cyan-300/50"
+                  />
+                </label>
+              </div>
+
+              <label className="block">
+                <span className="mb-2 block text-xs uppercase tracking-[0.2em] text-slate-400">Handoff Targets</span>
+                <input
+                  value={editor.handoffTargets}
+                  onChange={(event) => onEditorChange({ handoffTargets: event.target.value })}
+                  placeholder="captain, archivist"
+                  className="w-full rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-white outline-none transition focus:border-cyan-300/50"
+                />
+              </label>
+
+              <label className="block">
+                <span className="mb-2 block text-xs uppercase tracking-[0.2em] text-slate-400">Tool Policy JSON</span>
+                <textarea
+                  value={editor.toolPolicyJson}
+                  onChange={(event) => onEditorChange({ toolPolicyJson: event.target.value })}
+                  className="scroll-thin min-h-56 w-full rounded-[1.5rem] border border-white/10 bg-black/20 px-4 py-4 font-mono text-xs leading-6 text-cyan-50 outline-none transition focus:border-cyan-300/50"
+                />
+              </label>
+
+              <div className="rounded-[1.5rem] border border-white/8 bg-black/20 p-4 text-sm text-slate-400">
+                <p className="text-cyan-100">
+                  Provider route: {selectedProvider?.label ?? "none"} / {selectedProvider?.model ?? "unconfigured"}
+                </p>
+                <p className="mt-2">
+                  Workflow references: {workflowReferenceCount}
+                  {workflowReferenceCount ? " node(s) continue to target this agent id." : " no workflow bindings yet."}
+                </p>
+                <p className="mt-2">
+                  Agent ids are immutable after creation. Tool toggles automatically synchronize allowed tools inside the JSON policy block.
+                </p>
+              </div>
+
+              <div className="flex flex-wrap gap-3">
+                <button
+                  type="button"
+                  onClick={onSave}
+                  disabled={!settings?.providers.length || busy === "save-agent"}
+                  data-testid="agent-save"
+                  className="rounded-[1.4rem] bg-gradient-to-r from-cyan-300 via-sky-300 to-amber-300 px-5 py-3 text-sm font-semibold uppercase tracking-[0.2em] text-slate-950 transition hover:brightness-110 disabled:opacity-60"
+                >
+                  {busy === "save-agent"
+                    ? "Synchronizing"
+                    : editorMode === "create"
+                      ? "Forge Agent"
+                      : "Update Agent"}
+                </button>
+                <button
+                  type="button"
+                  onClick={onDelete}
+                  disabled={editorMode !== "edit" || busy === "delete-agent"}
+                  data-testid="agent-delete"
+                  className="rounded-[1.4rem] border border-rose-300/30 bg-rose-300/10 px-5 py-3 text-sm font-semibold uppercase tracking-[0.2em] text-rose-100 transition hover:border-rose-200/50 hover:bg-rose-200/15 disabled:opacity-50"
+                >
+                  {busy === "delete-agent" ? "Purging" : "Delete Agent"}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <p className="mt-4 text-sm text-slate-400">Awaiting runtime settings before agent creation.</p>
+          )}
+        </div>
       </div>
       <div className="grid gap-4 xl:grid-cols-2">
         <div className="rounded-[1.8rem] border border-white/10 bg-black/20 p-4">
           <p className="panel-title text-amber-300">Provider Deck</p>
           <div className="mt-4 space-y-3">
-            {settings?.providers?.map((provider: any) => (
+            {settings?.providers.map((provider) => (
               <div key={provider.id} className="rounded-2xl border border-white/8 p-3">
                 <div className="flex items-center justify-between">
                   <strong className="text-white">{provider.label}</strong>

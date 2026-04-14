@@ -40,6 +40,32 @@ export const api = {
       body: JSON.stringify(payload)
     }),
   listAgents: (token: string) => request<AgentDefinition[]>("/agents", {}, token),
+  createAgent: (token: string, definition: AgentDefinition) =>
+    request<AgentDefinition>(
+      "/agents",
+      {
+        method: "POST",
+        body: JSON.stringify(definition)
+      },
+      token
+    ),
+  updateAgent: (token: string, agentId: string, definition: AgentDefinition) =>
+    request<AgentDefinition>(
+      `/agents/${agentId}`,
+      {
+        method: "PUT",
+        body: JSON.stringify(definition)
+      },
+      token
+    ),
+  deleteAgent: (token: string, agentId: string) =>
+    request<void>(
+      `/agents/${agentId}`,
+      {
+        method: "DELETE"
+      },
+      token
+    ),
   listWorkflows: (token: string) => request<WorkflowDefinition[]>("/workflows", {}, token),
   updateWorkflow: (token: string, definition: WorkflowDefinition) =>
     request<WorkflowDefinition>(

@@ -94,6 +94,60 @@ def test_public_api_health_alias(client) -> None:
     assert response.json() == {"status": "ok"}
 
 
+def test_agent_crud_round_trip(client, auth_headers) -> None:
+    settings = client.get("/api/v1/settings/runtime", headers=auth_headers)
+    settings.raise_for_status()
+    runtime_settings = settings.json()
+
+    payload = {
+        "id": "science-officer",
+        "name": "Science Officer",
+        "role": "research-analyst",
+        "description": "Investigates external systems and records findings.",
+        "systemPrompt": "Investigate carefully and summarize concrete findings.",
+        "provider": runtime_settings["providers"][0],
+        "tools": ["web", "api"],
+        "toolPolicy": {
+            **runtime_settings["defaultPolicy"],
+            "allowedTools": ["web", "api"],
+        },
+        "memoryProfile": {
+            "mode": "hybrid",
+            "namespace": "science",
+            "topK": 5,
+        },
+        "handoffTargets": ["captain", "archivist"],
+    }
+
+    created = client.post("/api/v1/agents", headers=auth_headers, json=payload)
+    created.raise_for_status()
+    created_payload = created.json()
+    assert created_payload["id"] == "science-officer"
+    assert created_payload["tools"] == ["web", "api"]
+
+    updated_payload = {
+        **created_payload,
+        "name": "Science Officer Prime",
+        "tools": ["web"],
+        "toolPolicy": {
+            **runtime_settings["defaultPolicy"],
+            "allowedTools": ["web"],
+        },
+        "handoffTargets": ["captain"],
+    }
+    updated = client.put("/api/v1/agents/science-officer", headers=auth_headers, json=updated_payload)
+    updated.raise_for_status()
+    assert updated.json()["name"] == "Science Officer Prime"
+    assert updated.json()["tools"] == ["web"]
+
+    deleted = client.delete("/api/v1/agents/science-officer", headers=auth_headers)
+    assert deleted.status_code == 204
+
+    remaining = client.get("/api/v1/agents", headers=auth_headers)
+    remaining.raise_for_status()
+    assert all(agent["id"] != "science-officer" for agent in remaining.json())
+
+
 def test_operator_can_pause_resume_and_disable_tools(client, auth_headers) -> None:
     workflow = {
         "definition": {

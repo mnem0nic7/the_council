@@ -27,3 +27,32 @@ test("captain can launch a mission and inspect replay data from the cockpit", as
   await expect(page.getByText("Long-Term Memory")).toBeVisible();
 });
 
+test("captain can forge a new agent from engineering and see it in the crew manifest", async ({ page }) => {
+  await page.goto("/");
+
+  await expect(page.getByRole("heading", { name: "Bridge Authorization" })).toBeVisible();
+  await page.getByTestId("login-submit").click();
+
+  await expect(page.getByRole("heading", { name: "Bridge Online" })).toBeVisible();
+  await page.getByTestId("station-engineering").click();
+
+  await expect(page.getByTestId("agent-editor")).toBeVisible();
+  await page.getByTestId("agent-new").click();
+
+  await page.getByTestId("agent-id").fill("science-officer");
+  await page.getByTestId("agent-name").fill("Science Officer");
+  await page.getByTestId("agent-role").fill("research-analyst");
+  await page.getByTestId("agent-system-prompt").fill(
+    "Investigate carefully, validate claims, and report crisp findings."
+  );
+  await page.getByTestId("agent-tool-web").click();
+  await page.getByTestId("agent-tool-api").click();
+  await page.getByTestId("agent-save").click();
+
+  await expect(page.getByTestId("agent-card-science-officer")).toBeVisible();
+  await expect(page.getByText("5 agents registered")).toBeVisible();
+
+  await page.getByTestId("station-crew").click();
+  await expect(page.getByText("Science Officer")).toBeVisible();
+  await expect(page.getByText("research-analyst")).toBeVisible();
+});
