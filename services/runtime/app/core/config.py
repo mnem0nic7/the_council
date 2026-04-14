@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     council_operator_password: str = Field(default="bridge123")
     web_origin: str = "http://localhost:3000"
     max_concurrent_llm_calls: int = 5
+    embedding_model: str = "text-embedding-3-small"
+    embedding_dimension: int = 1536
+    embedding_enabled: bool = False  # default off until pgvector is configured
 
     def ensure_paths(self) -> None:
         Path(self.artifact_root).mkdir(parents=True, exist_ok=True)

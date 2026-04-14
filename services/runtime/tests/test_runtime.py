@@ -1137,3 +1137,160 @@ async def test_human_input_default_returns_immediately():
 
     result = await executor._run_human_input_node("run-1", node, {})
     assert result.payload["input"] == "auto-proceed"
+
+
+# ---------------------------------------------------------------------------
+# Phase 13: Vector Memory with pgvector tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_embed_text_disabled() -> None:
+    """13a: embed_text returns None when embedding_enabled=False."""
+    from unittest.mock import patch
+
+    from app.core.config import get_settings
+    from app.embeddings import embed_text
+
+    settings = get_settings()
+    with patch.object(settings, "embedding_enabled", False):
+        with patch("app.embeddings.get_settings", return_value=settings):
+            result = await embed_text("some text to embed")
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_store_memory_sets_embedding() -> None:
+    """13b: _store_memory calls embed_text when pgvector is available and stores the result on the MemoryRecord."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from app.executor import MissionExecutor
+    from app.telemetry import TelemetryHub
+
+    fake_embedding = [0.1, 0.2, 0.3]
+    embed_mock = AsyncMock(return_value=fake_embedding)
+
+    telemetry = MagicMock(spec=TelemetryHub)
+    executor = MissionExecutor(telemetry)
+
+    stored_records: list[Any] = []
+
+    # Patch _HAS_PGVECTOR to True so the embedding path is exercised.
+    # Patch SessionLocal to capture what record is persisted without hitting SQLite
+    # with an incompatible list type (LargeBinary requires bytes).
+    with patch("app.executor._HAS_PGVECTOR", True):
+        with patch("app.executor.embed_text", embed_mock):
+            with patch("app.executor.SessionLocal") as mock_session_class:
+                session_mock = MagicMock()
+                mock_session_class.return_value.__enter__ = MagicMock(return_value=session_mock)
+                mock_session_class.return_value.__exit__ = MagicMock(return_value=False)
+                run_mock = MagicMock()
+                run_mock.mission_id = "m-emb-test"
+                session_mock.get.return_value = run_mock
+
+                def capture_add(record):
+                    stored_records.append(record)
+
+                session_mock.add.side_effect = capture_add
+
+                await executor._store_memory(
+                    "run-emb-test",
+                    None,
+                    "test-namespace",
+                    "hello world",
+                    tags=["test"],
+                    metadata={"nodeId": "n1"},
+                )
+
+    # embed_text should have been called with the content
+    embed_mock.assert_called_once_with("hello world")
+
+    # The MemoryRecord should have been constructed with the embedding
+    assert len(stored_records) == 1
+    record = stored_records[0]
+    assert record.embedding == fake_embedding
+    assert record.content == "hello world"
+    assert record.namespace == "test-namespace"
+
+
+@pytest.mark.asyncio
+async def test_memory_retrieval_falls_back_to_term_overlap() -> None:
+    """13c: _run_memory_node falls back to term-overlap when embed_text returns None."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from app.executor import MissionExecutor
+    from app.models import MemoryRecord
+    from app.schemas import WorkflowNode
+    from app.telemetry import TelemetryHub
+
+    # Pre-populate some memory records
+    with SessionLocal() as session:
+        mission = __import__("app.models", fromlist=["Mission"]).Mission(
+            id="m-fallback-test",
+            name="Fallback Mission",
+            description="",
+            status="running",
+            input_payload={},
+            output_payload={},
+            current_nodes=[],
+            provider_overrides={},
+            control_state={},
+            workflow_definition={"id": "wf", "name": "wf", "version": 1, "nodes": [], "edges": []},
+        )
+        session.add(mission)
+        run = __import__("app.models", fromlist=["MissionRun"]).MissionRun(
+            id="run-fallback-test",
+            mission_id="m-fallback-test",
+            name="Fallback Run",
+            status="running",
+            workflow_snapshot={"id": "wf", "name": "wf", "version": 1, "nodes": [], "edges": []},
+        )
+        session.add(run)
+        session.add(
+            MemoryRecord(
+                mission_id="m-fallback-test",
+                run_id="run-fallback-test",
+                namespace="fallback-ns",
+                content="the quick brown fox jumps",
+                tags=[],
+                metadata_json={},
+            )
+        )
+        session.add(
+            MemoryRecord(
+                mission_id="m-fallback-test",
+                run_id="run-fallback-test",
+                namespace="fallback-ns",
+                content="unrelated content about ships",
+                tags=[],
+                metadata_json={},
+            )
+        )
+        session.commit()
+
+    telemetry = MagicMock(spec=TelemetryHub)
+    executor = MissionExecutor(telemetry)
+
+    node = WorkflowNode(
+        id="n1",
+        name="Memory Read",
+        type="memory",
+        position={"x": 0, "y": 0},
+        config={"mode": "read", "namespace": "fallback-ns", "query": "fox jumps", "topK": 3},
+    )
+
+    # embed_text returns None -> falls back to term overlap
+    with patch("app.executor.embed_text", new_callable=AsyncMock, return_value=None):
+        with patch("app.executor.get_settings") as mock_settings:
+            mock_settings.return_value.embedding_enabled = False
+            mock_settings.return_value.default_memory_namespace = "bridge"
+            result = await executor._run_memory_node(
+                "run-fallback-test",
+                node,
+                {"mission": {"input": {"prompt": "fox jumps"}, "control": {}}, "results": {}},
+            )
+
+    assert result.payload["mode"] == "read"
+    assert len(result.payload["matches"]) >= 1
+    assert any("fox" in m for m in result.payload["matches"])

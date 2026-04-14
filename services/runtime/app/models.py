@@ -2,12 +2,21 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from typing import Any, Optional
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint
 from sqlalchemy.dialects.sqlite import JSON as SQLiteJSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
+
+try:
+    from pgvector.sqlalchemy import Vector as PgVector
+    _embedding_type: Any = PgVector(1536)
+    _HAS_PGVECTOR = True
+except ImportError:
+    _embedding_type = LargeBinary()
+    _HAS_PGVECTOR = False
 
 
 def utcnow() -> datetime:
@@ -172,6 +181,7 @@ class MemoryRecord(Base):
     content: Mapped[str] = mapped_column(Text)
     tags: Mapped[list[str]] = mapped_column(SQLiteJSON, default=list)
     metadata_json: Mapped[dict] = mapped_column("metadata", SQLiteJSON, default=dict)
+    embedding: Mapped[Optional[bytes]] = mapped_column(_embedding_type, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
