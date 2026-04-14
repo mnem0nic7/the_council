@@ -77,7 +77,9 @@ export function BridgeApp() {
     setSettings,
     setReplay,
     setSelectedMissionId,
-    setSelectedRunId
+    setSelectedRunId,
+    appendStreamToken,
+    clearStreamToken
   } = useCouncilStore();
 
   const [loginState, setLoginState] = useState<LoginState>({
@@ -269,18 +271,26 @@ export function BridgeApp() {
     let socket: WebSocket | null = new WebSocket(`${getWsBaseUrl()}/runs/${runId}?token=${authToken}`);
 
     socket.onmessage = (event) => {
-      const payload = JSON.parse(event.data) as TelemetryEvent | { type: "history"; events: TelemetryEvent[] };
+      const payload = JSON.parse(event.data) as TelemetryEvent | { type: "history"; events: TelemetryEvent[] } | { type: "node.stream_token"; nodeId: string; token: string; sequence: number; runId: string };
       if ("events" in payload) {
         setTelemetry(payload.events);
         void refreshRunContext(authToken, missionId, runId);
         return;
       }
-      appendTelemetry(payload);
+      const msg = payload as { type: string; [key: string]: unknown };
+      if (msg.type === "node.stream_token") {
+        appendStreamToken(msg.nodeId as string, msg.token as string);
+        return;
+      }
+      if (msg.type === "node.completed" && msg.nodeId) {
+        clearStreamToken(msg.nodeId as string);
+      }
+      appendTelemetry(payload as TelemetryEvent);
       if (
-        payload.type === "mission.completed" ||
-        payload.type === "mission.failed" ||
-        payload.type === "mission.cancelled" ||
-        payload.type === "mission.operator_action"
+        msg.type === "mission.completed" ||
+        msg.type === "mission.failed" ||
+        msg.type === "mission.cancelled" ||
+        msg.type === "mission.operator_action"
       ) {
         void hydrateMissionContext(authToken, missionId, false);
         void refreshRunContext(authToken, missionId, runId);

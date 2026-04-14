@@ -150,6 +150,29 @@ class TelemetryHub:
         self._schedule_dispatch(run_id, event_read.model_dump(mode="json"))
         return event_read
 
+    async def dispatch_stream_token(
+        self,
+        run_id: str,
+        node_id: str,
+        token: str,
+        sequence: int,
+    ) -> None:
+        """Broadcast a streaming token to WebSocket clients without persisting to DB."""
+        payload = {
+            "type": "node.stream_token",
+            "nodeId": node_id,
+            "token": token,
+            "sequence": sequence,
+            "runId": run_id,
+        }
+        await self.broadcast(run_id, payload)
+        if self._redis is not None:
+            envelope = json.dumps({"source": self._instance_id, "event": payload})
+            try:
+                await self._redis.publish(f"telemetry:runs:{run_id}", envelope)
+            except RedisError as exc:
+                logger.warning("Redis stream token publish failed for run %s: %s", run_id, exc)
+
     def _schedule_dispatch(self, run_id: str, payload: dict[str, Any]) -> None:
         try:
             loop = asyncio.get_running_loop()

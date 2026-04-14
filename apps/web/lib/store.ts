@@ -37,6 +37,7 @@ type CouncilState = {
   replay: ReplayPayload;
   selectedMissionId: string | null;
   selectedRunId: string | null;
+  streamingTokens: Record<string, string>;
   setAuth: (token: string | null, username: string | null) => void;
   setStation: (station: StationId) => void;
   setTemplateAgents: (agents: AgentDefinition[]) => void;
@@ -55,6 +56,8 @@ type CouncilState = {
   setReplay: (replay: ReplayPayload) => void;
   setSelectedMissionId: (missionId: string | null) => void;
   setSelectedRunId: (runId: string | null) => void;
+  appendStreamToken: (nodeId: string, token: string) => void;
+  clearStreamToken: (nodeId: string) => void;
 };
 
 export const useCouncilStore = create<CouncilState>((set) => ({
@@ -72,6 +75,7 @@ export const useCouncilStore = create<CouncilState>((set) => ({
   replay: null,
   selectedMissionId: null,
   selectedRunId: null,
+  streamingTokens: {},
   setAuth: (token, username) => set({ token, username }),
   setStation: (station) => set({ station }),
   setTemplateAgents: (templateAgents) => set({ templateAgents }),
@@ -149,5 +153,18 @@ export const useCouncilStore = create<CouncilState>((set) => ({
       telemetry: [],
       replay: null
     }),
-  setSelectedRunId: (selectedRunId) => set({ selectedRunId, telemetry: [], replay: null })
+  setSelectedRunId: (selectedRunId) => set({ selectedRunId, telemetry: [], replay: null }),
+  appendStreamToken: (nodeId, token) =>
+    set((state) => ({
+      streamingTokens: {
+        ...state.streamingTokens,
+        [nodeId]: (state.streamingTokens[nodeId] ?? "") + token,
+      },
+    })),
+  clearStreamToken: (nodeId) =>
+    set((state) => {
+      const next = { ...state.streamingTokens };
+      delete next[nodeId];
+      return { streamingTokens: next };
+    }),
 }));

@@ -231,6 +231,15 @@ export const ArtifactRecordSchema = z.object({
 });
 export type ArtifactRecord = z.infer<typeof ArtifactRecordSchema>;
 
+export const StreamTokenEventSchema = z.object({
+  type: z.literal("node.stream_token"),
+  nodeId: z.string(),
+  token: z.string(),
+  sequence: z.number().int().nonnegative(),
+  runId: z.string(),
+});
+export type StreamTokenEvent = z.infer<typeof StreamTokenEventSchema>;
+
 export const MissionActionSchema = z.object({
   action: z.enum(["pause", "resume", "cancel", "retask", "disable_tool"]),
   payload: z.record(z.any()).default({})

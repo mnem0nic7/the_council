@@ -635,6 +635,64 @@ def test_tool_output_not_truncated_when_short() -> None:
     assert "_truncated" not in out
 
 
+# ---------------------------------------------------------------------------
+# Phase 8: LLM Streaming tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stream_complete_scripted() -> None:
+    """8a: stream_complete yields tokens word-by-word for the scripted-local provider."""
+    from app.providers import ProviderService
+    from app.schemas import ProviderConfig
+
+    service = ProviderService()
+    provider = ProviderConfig(
+        id="scripted-local",
+        label="Test",
+        mode="local",
+        model="scripted-local",
+    )
+    tokens = []
+    async for token in service.stream_complete(
+        provider,
+        system_prompt="You are a test agent.",
+        user_prompt="Hello",
+    ):
+        tokens.append(token)
+
+    assert len(tokens) > 0
+    full = "".join(tokens)
+    assert len(full) > 0
+
+
+@pytest.mark.asyncio
+async def test_dispatch_stream_token_no_db_write() -> None:
+    """8b: dispatch_stream_token broadcasts via WebSocket without writing to the DB."""
+    from app.telemetry import TelemetryHub
+
+    hub = TelemetryHub()
+
+    # Mock broadcast to capture calls
+    broadcast_calls = []
+
+    async def mock_broadcast(run_id, payload):
+        broadcast_calls.append((run_id, payload))
+
+    hub.broadcast = mock_broadcast
+
+    await hub.dispatch_stream_token("run-1", "node-1", "hello", 0)
+
+    assert len(broadcast_calls) == 1
+    run_id, payload = broadcast_calls[0]
+    assert run_id == "run-1"
+    assert payload["type"] == "node.stream_token"
+    assert payload["token"] == "hello"
+    assert payload["nodeId"] == "node-1"
+    assert payload["sequence"] == 0
+    # No DB writes — no session was created
+
+
 @pytest.mark.asyncio
 async def test_provider_semaphore_limits_concurrency() -> None:
     """7d: ProviderService initialises a semaphore that limits to max_concurrent_llm_calls."""

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import Any
+from typing import Any, AsyncIterator
 
 from litellm import acompletion
 
@@ -44,6 +44,45 @@ class ProviderService:
         async with self._semaphore:
             response = await acompletion(**request)
         return response.choices[0].message.content or ""
+
+    async def stream_complete(
+        self,
+        provider: ProviderConfig,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> AsyncIterator[str]:
+        """Async generator yielding completion tokens one at a time."""
+        if provider.id == "scripted-local" or provider.model == "scripted-local":
+            # Yield scripted response word by word for testing
+            response = self._scripted_response(system_prompt, user_prompt)
+            for word in response.split():
+                yield word + " "
+            return
+
+        request: dict[str, Any] = {
+            "model": provider.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": provider.temperature,
+            "max_tokens": provider.maxTokens,
+            "stream": True,
+        }
+        if provider.baseUrl:
+            request["api_base"] = provider.baseUrl
+        if provider.apiKeyEnv:
+            api_key = os.getenv(provider.apiKeyEnv)
+            if api_key:
+                request["api_key"] = api_key
+
+        async with self._semaphore:
+            response = await acompletion(**request)
+            async for chunk in response:
+                token = chunk.choices[0].delta.content or ""
+                if token:
+                    yield token
 
     def _scripted_response(self, system_prompt: str, user_prompt: str) -> str:
         preview = user_prompt.replace("\n", " ").strip()[:240]

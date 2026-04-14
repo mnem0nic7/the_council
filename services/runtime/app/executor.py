@@ -321,11 +321,17 @@ class MissionExecutor:
         if operator_notes and "{{mission.control.retask_notes}}" not in prompt_template:
             prompt = f"{prompt}\n\nRetask notes:\n{operator_notes}"
 
-        completion = await self.providers.complete(
+        chunks: list[str] = []
+        seq = 0
+        async for token in self.providers.stream_complete(
             provider,
             system_prompt=agent.systemPrompt,
             user_prompt=prompt,
-        )
+        ):
+            chunks.append(token)
+            await self.telemetry.dispatch_stream_token(run_id, node.id, token, seq)
+            seq += 1
+        completion = "".join(chunks)
         route = None
         if "ROUTE:" in completion:
             route = completion.split("ROUTE:", 1)[1].splitlines()[0].strip()
