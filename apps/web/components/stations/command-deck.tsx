@@ -1,6 +1,6 @@
 "use client";
 
-import { type CSSProperties } from "react";
+import { type CSSProperties, useState } from "react";
 import type {
   MissionRun,
   MissionWorkspace,
@@ -25,10 +25,12 @@ export function CommandDeck({
   selectedRun,
   telemetry,
   templateWorkflows,
+  awaitingInputPrompt,
   onPatchDraft,
   onCreateMission,
   onSaveMission,
-  onLaunchRun
+  onLaunchRun,
+  onProvideInput
 }: {
   busy: string | null;
   missionDraft: MissionDraftState;
@@ -36,11 +38,14 @@ export function CommandDeck({
   selectedRun?: MissionRun;
   telemetry: TelemetryEvent[];
   templateWorkflows: WorkflowDefinition[];
+  awaitingInputPrompt: string | null;
   onPatchDraft: (patch: Partial<MissionDraftState>) => void;
   onCreateMission: () => void;
   onSaveMission: () => void;
   onLaunchRun: () => void;
+  onProvideInput: (input: string) => Promise<void>;
 }) {
+  const [humanInputText, setHumanInputText] = useState("");
   const commandResize = usePanelResize(
     commandPanelStorageKey,
     commandPanelDefaultWidth,
@@ -194,6 +199,39 @@ export function CommandDeck({
             {busy === "launch" ? "Engaging" : "Launch Run"}
           </button>
         </div>
+
+        {awaitingInputPrompt !== null ? (
+          <div
+            data-testid="human-input-dialog"
+            className="rounded-[1.8rem] border border-amber-300/40 bg-black/15 p-4"
+          >
+            <div className="mb-4">
+              <p className="panel-title text-amber-300">Operator Input Required</p>
+              <h3 className="mt-2 text-lg text-white">Workflow is awaiting your response</h3>
+            </div>
+            <p className="mb-3 text-sm text-slate-300">{awaitingInputPrompt}</p>
+            <textarea
+              value={humanInputText}
+              onChange={(event) => setHumanInputText(event.target.value)}
+              data-testid="human-input-textarea"
+              placeholder="Enter your response..."
+              className="min-h-24 w-full rounded-[1.5rem] border border-white/10 bg-black/20 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-amber-300/50"
+            />
+            <button
+              type="button"
+              data-testid="human-input-submit"
+              disabled={busy === "provide_input"}
+              onClick={() => {
+                const input = humanInputText;
+                setHumanInputText("");
+                void onProvideInput(input);
+              }}
+              className="mt-3 rounded-[1.4rem] bg-gradient-to-r from-amber-300 via-yellow-300 to-cyan-300 px-5 py-3 text-sm font-semibold uppercase tracking-[0.2em] text-slate-950 transition hover:brightness-110 disabled:opacity-60"
+            >
+              Submit
+            </button>
+          </div>
+        ) : null}
       </div>
 
       <div className="hidden lg:flex items-stretch justify-center">

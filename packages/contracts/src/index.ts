@@ -241,7 +241,7 @@ export const StreamTokenEventSchema = z.object({
 export type StreamTokenEvent = z.infer<typeof StreamTokenEventSchema>;
 
 export const MissionActionSchema = z.object({
-  action: z.enum(["pause", "resume", "cancel", "retask", "disable_tool"]),
+  action: z.enum(["pause", "resume", "cancel", "retask", "disable_tool", "provide_input"]),
   payload: z.record(z.any()).default({})
 });
 export type MissionAction = z.infer<typeof MissionActionSchema>;

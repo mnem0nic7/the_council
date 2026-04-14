@@ -346,7 +346,7 @@ class MissionExecutor:
             elif node.type == "delay":
                 result = await self._run_delay_node(node, context)
             elif node.type == "human_input":
-                result = self._run_human_input_node(run_id, node, context)
+                result = await self._run_human_input_node(run_id, node, context)
             elif node.type == "terminal":
                 result = self._run_terminal_node(node, context)
             else:
@@ -628,19 +628,68 @@ class MissionExecutor:
         await asyncio.sleep(seconds)
         return NodeResult(payload={"seconds": seconds})
 
-    def _run_human_input_node(self, run_id: str, node: WorkflowNode, context: dict[str, Any]) -> NodeResult:
+    async def _run_human_input_node(self, run_id: str, node: WorkflowNode, context: dict[str, Any]) -> NodeResult:
+        """Block until operator provides input or timeout expires."""
         if "defaultInput" in node.config:
             default_input = self._render_value(node.config["defaultInput"], context)
             return NodeResult(payload={"input": default_input})
 
+        timeout_seconds = float(node.config.get("timeoutSeconds", 3600))
+        prompt_text = str(self._render_value(node.config.get("prompt", "Operator input required"), context))
+
+        # Set run to awaiting_input status
         with SessionLocal() as session:
             run = session.get(MissionRun, run_id)
             if run is None:
                 raise RuntimeError("Run not found")
-            notes = (run.control_state or {}).get("retask_notes", [])
-        if notes:
-            return NodeResult(payload={"input": notes[-1]})
-        raise RuntimeError("human_input node requires defaultInput or operator retask notes")
+            mission = session.get(Mission, run.mission_id)
+            if mission is None:
+                raise RuntimeError("Mission not found")
+            control_state = copy.deepcopy(run.control_state or {})
+            control_state["awaiting_input_node"] = node.id
+            control_state["awaiting_input_prompt"] = prompt_text
+            run.control_state = control_state
+            run.status = "awaiting_input"
+            sync_mission_from_run(mission, run)
+            session.commit()
+            self.telemetry.persist_event(
+                session,
+                mission.id,
+                run_id,
+                "node.awaiting_input",
+                f"{node.name} awaiting operator input: {prompt_text}",
+                node_id=node.id,
+                data={"prompt": prompt_text},
+            )
+
+        # Poll for response
+        deadline = asyncio.get_event_loop().time() + timeout_seconds
+        while asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.5)
+            with SessionLocal() as session:
+                run = session.get(MissionRun, run_id)
+                if run is None:
+                    raise RuntimeError("Run not found")
+                control_state = run.control_state or {}
+                if "human_input_response" in control_state:
+                    response = control_state["human_input_response"]
+                    # Clear the response and restore running status
+                    next_control = copy.deepcopy(control_state)
+                    del next_control["human_input_response"]
+                    next_control.pop("awaiting_input_node", None)
+                    next_control.pop("awaiting_input_prompt", None)
+                    mission = session.get(Mission, run.mission_id)
+                    if mission is None:
+                        raise RuntimeError("Mission not found")
+                    run.control_state = next_control
+                    run.status = "running"
+                    sync_mission_from_run(mission, run)
+                    session.commit()
+                    return NodeResult(payload={"input": response})
+                if control_state.get("cancelled"):
+                    raise MissionCancelled()
+
+        raise RuntimeError(f"human_input node timed out after {timeout_seconds}s waiting for operator input")
 
     def _run_terminal_node(self, node: WorkflowNode, context: dict[str, Any]) -> NodeResult:
         output = self._render_value(node.config.get("output", "{{results}}"), context)
@@ -838,6 +887,9 @@ def apply_operator_action(run: MissionRun, action: str, payload: dict[str, Any])
         tool_name = payload.get("tool")
         if tool_name and tool_name not in control_state["disabled_tools"]:
             control_state["disabled_tools"].append(tool_name)
+    elif action == "provide_input":
+        input_text = payload.get("input", "")
+        control_state["human_input_response"] = input_text
 
     run.control_state = control_state
 

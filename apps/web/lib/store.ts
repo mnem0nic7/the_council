@@ -38,6 +38,7 @@ type CouncilState = {
   selectedMissionId: string | null;
   selectedRunId: string | null;
   streamingTokens: Record<string, string>;
+  awaitingInputPrompt: string | null;
   setAuth: (token: string | null, username: string | null) => void;
   setStation: (station: StationId) => void;
   setTemplateAgents: (agents: AgentDefinition[]) => void;
@@ -58,6 +59,7 @@ type CouncilState = {
   setSelectedRunId: (runId: string | null) => void;
   appendStreamToken: (nodeId: string, token: string) => void;
   clearStreamToken: (nodeId: string) => void;
+  setAwaitingInputPrompt: (prompt: string | null) => void;
 };
 
 export const useCouncilStore = create<CouncilState>((set) => ({
@@ -76,6 +78,7 @@ export const useCouncilStore = create<CouncilState>((set) => ({
   selectedMissionId: null,
   selectedRunId: null,
   streamingTokens: {},
+  awaitingInputPrompt: null,
   setAuth: (token, username) => set({ token, username }),
   setStation: (station) => set({ station }),
   setTemplateAgents: (templateAgents) => set({ templateAgents }),
@@ -167,4 +170,5 @@ export const useCouncilStore = create<CouncilState>((set) => ({
       delete next[nodeId];
       return { streamingTokens: next };
     }),
+  setAwaitingInputPrompt: (prompt) => set({ awaitingInputPrompt: prompt }),
 }));

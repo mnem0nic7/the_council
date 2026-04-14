@@ -1086,3 +1086,54 @@ async def test_handoff_depth_limit() -> None:
 
     # Should complete without recursive call, just log the depth-limit warning
     assert "output" in result.payload
+
+
+# ---------------------------------------------------------------------------
+# Phase 10: Human-in-the-Loop tests
+# ---------------------------------------------------------------------------
+
+
+def test_provide_input_action():
+    """provide_input action writes human_input_response to control_state."""
+    from app.executor import apply_operator_action
+    from app.models import MissionRun
+
+    run = MissionRun(
+        id="run-1",
+        mission_id="m1",
+        name="Test",
+        status="awaiting_input",
+        workflow_snapshot={},
+        agent_snapshot=[],
+        input_payload={},
+        execution_state={},
+        control_state={"awaiting_input_node": "node-1"},
+    )
+
+    apply_operator_action(run, "provide_input", {"input": "yes, proceed"})
+
+    assert run.control_state["human_input_response"] == "yes, proceed"
+
+
+@pytest.mark.asyncio
+async def test_human_input_default_returns_immediately():
+    """human_input node with defaultInput returns without blocking."""
+    from unittest.mock import MagicMock
+
+    from app.executor import MissionExecutor
+    from app.schemas import WorkflowNode
+    from app.telemetry import TelemetryHub
+
+    telemetry = MagicMock(spec=TelemetryHub)
+    executor = MissionExecutor(telemetry)
+
+    node = WorkflowNode(
+        id="n1",
+        name="Input Node",
+        type="human_input",
+        position={"x": 0, "y": 0},
+        config={"defaultInput": "auto-proceed"},
+    )
+
+    result = await executor._run_human_input_node("run-1", node, {})
+    assert result.payload["input"] == "auto-proceed"

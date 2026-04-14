@@ -60,6 +60,7 @@ export function BridgeApp() {
     replay,
     selectedMissionId,
     selectedRunId,
+    awaitingInputPrompt,
     setAuth,
     setStation,
     setTemplateAgents,
@@ -79,7 +80,8 @@ export function BridgeApp() {
     setSelectedMissionId,
     setSelectedRunId,
     appendStreamToken,
-    clearStreamToken
+    clearStreamToken,
+    setAwaitingInputPrompt
   } = useCouncilStore();
 
   const [loginState, setLoginState] = useState<LoginState>({
@@ -284,6 +286,11 @@ export function BridgeApp() {
       }
       if (msg.type === "node.completed" && msg.nodeId) {
         clearStreamToken(msg.nodeId as string);
+      }
+      if (msg.type === "node.awaiting_input") {
+        setAwaitingInputPrompt((msg as any).data?.prompt as string ?? "Operator input required");
+        appendTelemetry(msg as TelemetryEvent);
+        return;
       }
       appendTelemetry(payload as TelemetryEvent);
       if (
@@ -546,6 +553,19 @@ export function BridgeApp() {
     }
   }
 
+  async function handleProvideInput(input: string) {
+    if (!token || !selectedMission?.activeRunId) return;
+    try {
+      await api.actionMissionRun(token, selectedMission.id, selectedMission.activeRunId, {
+        action: "provide_input",
+        payload: { input },
+      });
+      setAwaitingInputPrompt(null);
+    } catch (e) {
+      setError("Failed to submit input");
+    }
+  }
+
   async function dispatchRunAction(action: MissionAction) {
     if (!token || !selectedMission || !selectedRun) {
       return;
@@ -724,10 +744,12 @@ export function BridgeApp() {
                 selectedRun={selectedRun}
                 telemetry={telemetry}
                 templateWorkflows={templateWorkflows}
+                awaitingInputPrompt={awaitingInputPrompt}
                 onPatchDraft={patchMissionDraft}
                 onCreateMission={() => void createMission()}
                 onSaveMission={() => void saveMissionWorkspace()}
                 onLaunchRun={() => void launchRun()}
+                onProvideInput={(input) => handleProvideInput(input)}
               />
             ) : null}
             {station === "tactical" ? (

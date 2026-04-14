@@ -160,7 +160,7 @@ class MissionRunCreate(BaseModel):
 
 
 class MissionActionRequest(BaseModel):
-    action: Literal["pause", "resume", "cancel", "retask", "disable_tool"]
+    action: Literal["pause", "resume", "cancel", "retask", "disable_tool", "provide_input"]
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
