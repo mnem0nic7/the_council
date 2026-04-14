@@ -18,4 +18,5 @@
 - Tactical now edits the selected mission workflow through both structured node/edge controls and synchronized raw JSON.
 - Command Deck telemetry payloads wrap inside their panel instead of forcing horizontal page overflow.
 - Runtime startup migrations need to stay dialect-aware; PostgreSQL rejects SQLite-style `DATETIME` column additions.
+- Legacy mission migration has to treat both SQL `NULL` and JSON `null` as missing workflow snapshots, and serialize snapshot timestamps to ISO strings before writing JSON columns.
 - If a local Next.js build fails with a spurious `/_document` error after heavy local churn, clearing `apps/web/.next` and rebuilding restores a clean build state.

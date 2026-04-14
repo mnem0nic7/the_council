@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import time
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 
+from app.db import SessionLocal
+from app.migrations import migrate_legacy_missions
+from app.models import Mission, MissionRun
 from app.schemas import ToolPolicy, WorkflowDefinition
 from app.tools import ToolPolicyError, ToolRunner
 
@@ -181,6 +185,43 @@ def test_imported_mission_agent_is_isolated_from_global_template(client, auth_he
     global_agents.raise_for_status()
     global_captain = next(agent for agent in global_agents.json() if agent["id"] == "captain")
     assert global_captain["name"] == "Captain"
+
+
+def test_legacy_mission_migration_serializes_snapshot_timestamps() -> None:
+    legacy_timestamp = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+
+    with SessionLocal() as session:
+        session.add(
+            Mission(
+                id="legacy-bridge",
+                workflow_id="bridge-assessment",
+                name="Legacy Bridge",
+                description="Created before mission workspaces existed.",
+                status="completed",
+                input_payload={"prompt": "Legacy bridge review", "route": "analysis"},
+                output_payload={"results": {}},
+                current_nodes=[],
+                provider_overrides={},
+                control_state={},
+                workflow_definition=None,
+                active_run_id=None,
+                latest_run_id=None,
+                created_at=legacy_timestamp,
+                updated_at=legacy_timestamp,
+                started_at=legacy_timestamp,
+                completed_at=legacy_timestamp,
+            )
+        )
+        session.commit()
+
+    migrate_legacy_missions()
+
+    with SessionLocal() as session:
+        migrated_run = session.get(MissionRun, "legacy-bridge")
+        assert migrated_run is not None
+        captain_snapshot = next(agent for agent in migrated_run.agent_snapshot if agent["id"] == "captain")
+        assert captain_snapshot["createdAt"] == legacy_timestamp.isoformat()
+        assert captain_snapshot["updatedAt"] == legacy_timestamp.isoformat()
 
 
 def test_mission_run_executes_seeded_template_and_persists_replay(client, auth_headers) -> None:

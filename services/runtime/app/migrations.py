@@ -46,6 +46,18 @@ def referenced_agent_ids(definition: dict[str, object] | None) -> list[str]:
     return sorted(set(agent_ids))
 
 
+def json_compatible(value: object) -> object:
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=UTC)
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(key): json_compatible(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [json_compatible(item) for item in value]
+    return value
+
+
 def ensure_runtime_schema() -> None:
     inspector = inspect(engine)
     tables = set(inspector.get_table_names())
@@ -106,7 +118,9 @@ def ensure_runtime_schema() -> None:
 
 def migrate_legacy_missions() -> None:
     with SessionLocal() as session:
-        legacy_missions = session.scalars(select(Mission).where(Mission.workflow_definition.is_(None))).all()
+        legacy_missions = [
+            mission for mission in session.scalars(select(Mission)).all() if mission.workflow_definition is None
+        ]
         if not legacy_missions:
             return
 
@@ -156,7 +170,8 @@ def migrate_legacy_missions() -> None:
                 select(MissionAgent).where(MissionAgent.mission_id == mission.id).order_by(MissionAgent.name)
             ).all()
             agent_snapshot = [
-                {
+                json_compatible(
+                    {
                     "id": agent.local_id,
                     "missionId": mission.id,
                     "templateAgentId": agent.template_agent_id,
@@ -171,7 +186,8 @@ def migrate_legacy_missions() -> None:
                     "handoffTargets": agent.handoff_targets,
                     "createdAt": agent.created_at,
                     "updatedAt": agent.updated_at,
-                }
+                    }
+                )
                 for agent in mission_agents
             ]
 

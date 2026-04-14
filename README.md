@@ -38,6 +38,7 @@ The default operator account is `captain` / `bridge123`.
 - Only one active run is allowed per mission in v1. Structural mission edits are blocked unless there is no active run or the active run is paused.
 - When a paused run is edited structurally, the runtime updates both the paused run snapshot and the mission workspace default so future runs inherit the same changes.
 - Startup schema patching is dialect-aware for both SQLite and PostgreSQL-backed deployments.
+- Legacy mission promotion handles missing workflow snapshots stored as either SQL `NULL` or JSON `null`, and normalizes snapshot timestamps to ISO strings before writing JSON columns.
 - Telemetry uses local websocket fanout by default and upgrades to Redis pub/sub automatically when `REDIS_URL` is reachable.
 - Artifact storage writes to the local filesystem by default and uploads to an S3-compatible object store when `OBJECT_STORE_*` settings are provided.
 - The provided Docker Compose stack enables Redis telemetry and MinIO-backed artifact storage out of the box.
