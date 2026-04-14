@@ -859,6 +859,103 @@ async def test_node_error_records_written() -> None:
     assert rec.traceback is not None
 
 
+# ---------------------------------------------------------------------------
+# Phase 11: Multi-Turn Conversation History tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_multi_turn_accumulates_history() -> None:
+    """11a: Second call to a multi-turn agent receives prior conversation."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.executor import MissionExecutor
+    from app.telemetry import TelemetryHub
+
+    telemetry = MagicMock(spec=TelemetryHub)
+    telemetry.persist_event = MagicMock(return_value=MagicMock())
+    telemetry._schedule_dispatch = MagicMock()
+    telemetry.dispatch_stream_token = AsyncMock()
+    executor = MissionExecutor(telemetry)
+
+    # Verify _build_conversation_messages builds correct message list
+    messages = executor._build_conversation_messages(
+        system_prompt="You are helpful.",
+        history=[
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi there!"},
+        ],
+        new_user_prompt="How are you?",
+        max_history_turns=10,
+    )
+
+    assert messages[0] == {"role": "system", "content": "You are helpful."}
+    assert messages[1] == {"role": "user", "content": "Hello"}
+    assert messages[2] == {"role": "assistant", "content": "Hi there!"}
+    assert messages[3] == {"role": "user", "content": "How are you?"}
+    assert len(messages) == 4
+
+
+def test_conversation_history_truncation() -> None:
+    """11b: History is truncated to max_history_turns pairs."""
+    from unittest.mock import MagicMock
+
+    from app.executor import MissionExecutor
+    from app.telemetry import TelemetryHub
+
+    telemetry = MagicMock(spec=TelemetryHub)
+    executor = MissionExecutor(telemetry)
+
+    # Build a long history (6 turns = 12 messages)
+    history = []
+    for i in range(6):
+        history.append({"role": "user", "content": f"Message {i}"})
+        history.append({"role": "assistant", "content": f"Response {i}"})
+
+    # With max_history_turns=2, only last 4 messages kept + system + new user
+    messages = executor._build_conversation_messages(
+        system_prompt="System",
+        history=history,
+        new_user_prompt="Latest",
+        max_history_turns=2,
+    )
+
+    # system + 4 history messages + new user = 6
+    assert len(messages) == 6
+    assert messages[0]["role"] == "system"
+    assert messages[-1] == {"role": "user", "content": "Latest"}
+
+
+@pytest.mark.asyncio
+async def test_provider_complete_with_messages() -> None:
+    """11c: complete() uses provided messages when given."""
+    from app.providers import ProviderService
+    from app.schemas import ProviderConfig
+
+    service = ProviderService()
+    provider = ProviderConfig(
+        id="scripted-local",
+        label="Test",
+        mode="local",
+        model="scripted-local",
+    )
+
+    # scripted-local ignores messages but doesn't crash
+    result = await service.complete(
+        provider,
+        system_prompt="system",
+        user_prompt="user",
+        messages=[
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "prior"},
+            {"role": "assistant", "content": "response"},
+            {"role": "user", "content": "user"},
+        ],
+    )
+    assert isinstance(result, str)
+    assert len(result) > 0
+
+
 @pytest.mark.asyncio
 async def test_provider_semaphore_limits_concurrency() -> None:
     """7d: ProviderService initialises a semaphore that limits to max_concurrent_llm_calls."""

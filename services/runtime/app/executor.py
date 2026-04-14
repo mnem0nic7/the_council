@@ -192,10 +192,9 @@ class MissionExecutor:
                 for node_id, result in zip(batch, batch_results, strict=True):
                     next_results[node_id] = result.payload
                     next_completed.add(node_id)
-                run.execution_state = {
-                    "results": next_results,
-                    "completedNodes": sorted(next_completed),
-                }
+                next_state["results"] = next_results
+                next_state["completedNodes"] = sorted(next_completed)
+                run.execution_state = next_state
                 run.current_nodes = []
                 sync_mission_from_run(mission, run)
                 session.commit()
@@ -382,6 +381,22 @@ class MissionExecutor:
                 )
         return result
 
+    @staticmethod
+    def _build_conversation_messages(
+        system_prompt: str,
+        history: list[dict],
+        new_user_prompt: str,
+        max_history_turns: int,
+    ) -> list[dict]:
+        """Build message list with system prompt and history, truncated to max_history_turns."""
+        messages = [{"role": "system", "content": system_prompt}]
+        # Add history, keeping last max_history_turns pairs (user+assistant)
+        max_messages = max_history_turns * 2
+        trimmed = history[-max_messages:] if len(history) > max_messages else history
+        messages.extend(trimmed)
+        messages.append({"role": "user", "content": new_user_prompt})
+        return messages
+
     async def _run_agent_node(self, run_id: str, node: WorkflowNode, context: dict[str, Any]) -> NodeResult:
         with SessionLocal() as session:
             run = session.get(MissionRun, run_id)
@@ -410,17 +425,60 @@ class MissionExecutor:
         if operator_notes and "{{mission.control.retask_notes}}" not in prompt_template:
             prompt = f"{prompt}\n\nRetask notes:\n{operator_notes}"
 
-        chunks: list[str] = []
-        seq = 0
-        async for token in self.providers.stream_complete(
-            provider,
-            system_prompt=agent.systemPrompt,
-            user_prompt=prompt,
-        ):
-            chunks.append(token)
-            await self.telemetry.dispatch_stream_token(run_id, node.id, token, seq)
-            seq += 1
-        completion = "".join(chunks)
+        multi_turn = bool(node.config.get("multiTurn", False))
+        agent_id = agent.id
+
+        if multi_turn:
+            with SessionLocal() as session:
+                run = session.get(MissionRun, run_id)
+                exec_state = copy.deepcopy(run.execution_state or {})
+            conversations = exec_state.setdefault("conversations", {})
+            prior_history = conversations.get(agent_id, [])
+            max_history_turns = int(node.config.get("maxHistoryTurns", 10))
+            messages = self._build_conversation_messages(
+                agent.systemPrompt, prior_history, prompt, max_history_turns
+            )
+
+            # Stream with full message history
+            chunks: list[str] = []
+            seq = 0
+            async for token in self.providers.stream_complete(
+                provider,
+                system_prompt=agent.systemPrompt,
+                user_prompt=prompt,
+                messages=messages,
+            ):
+                chunks.append(token)
+                await self.telemetry.dispatch_stream_token(run_id, node.id, token, seq)
+                seq += 1
+            completion = "".join(chunks)
+
+            # Persist updated conversation history
+            new_history = prior_history + [
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": completion},
+            ]
+            with SessionLocal() as session:
+                run = session.get(MissionRun, run_id)
+                if run is not None:
+                    next_state = copy.deepcopy(run.execution_state or {})
+                    next_state.setdefault("conversations", {})[agent_id] = new_history
+                    run.execution_state = next_state
+                    session.commit()
+        else:
+            # Single-turn (current behavior)
+            chunks = []
+            seq = 0
+            async for token in self.providers.stream_complete(
+                provider,
+                system_prompt=agent.systemPrompt,
+                user_prompt=prompt,
+            ):
+                chunks.append(token)
+                await self.telemetry.dispatch_stream_token(run_id, node.id, token, seq)
+                seq += 1
+            completion = "".join(chunks)
+
         route = None
         if "ROUTE:" in completion:
             route = completion.split("ROUTE:", 1)[1].splitlines()[0].strip()

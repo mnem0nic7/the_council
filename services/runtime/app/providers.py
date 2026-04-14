@@ -21,16 +21,22 @@ class ProviderService:
         *,
         system_prompt: str,
         user_prompt: str,
+        messages: list[dict] | None = None,
     ) -> str:
         if provider.id == "scripted-local" or provider.model == "scripted-local":
             return self._scripted_response(system_prompt, user_prompt)
 
-        request: dict[str, Any] = {
-            "model": provider.model,
-            "messages": [
+        if messages is not None:
+            request_messages = messages
+        else:
+            request_messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
-            ],
+            ]
+
+        request: dict[str, Any] = {
+            "model": provider.model,
+            "messages": request_messages,
             "temperature": provider.temperature,
             "max_tokens": provider.maxTokens,
         }
@@ -51,6 +57,7 @@ class ProviderService:
         *,
         system_prompt: str,
         user_prompt: str,
+        messages: list[dict] | None = None,
     ) -> AsyncIterator[str]:
         """Async generator yielding completion tokens one at a time."""
         if provider.id == "scripted-local" or provider.model == "scripted-local":
@@ -60,12 +67,17 @@ class ProviderService:
                 yield word + " "
             return
 
-        request: dict[str, Any] = {
-            "model": provider.model,
-            "messages": [
+        if messages is not None:
+            request_messages = messages
+        else:
+            request_messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
-            ],
+            ]
+
+        request: dict[str, Any] = {
+            "model": provider.model,
+            "messages": request_messages,
             "temperature": provider.temperature,
             "max_tokens": provider.maxTokens,
             "stream": True,
