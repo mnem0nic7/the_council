@@ -39,6 +39,9 @@ type CouncilState = {
   selectedRunId: string | null;
   streamingTokens: Record<string, string>;
   awaitingInputPrompt: string | null;
+  initialLoad: boolean;
+  loading: Record<string, boolean>;
+  errors: Record<string, string | null>;
   setAuth: (token: string | null, username: string | null) => void;
   setStation: (station: StationId) => void;
   setTemplateAgents: (agents: AgentDefinition[]) => void;
@@ -60,6 +63,9 @@ type CouncilState = {
   appendStreamToken: (nodeId: string, token: string) => void;
   clearStreamToken: (nodeId: string) => void;
   setAwaitingInputPrompt: (prompt: string | null) => void;
+  setInitialLoad: (loaded: boolean) => void;
+  setLoading: (key: string, loading: boolean) => void;
+  setError: (key: string, error: string | null) => void;
 };
 
 export const useCouncilStore = create<CouncilState>((set) => ({
@@ -79,6 +85,9 @@ export const useCouncilStore = create<CouncilState>((set) => ({
   selectedRunId: null,
   streamingTokens: {},
   awaitingInputPrompt: null,
+  initialLoad: false,
+  loading: {},
+  errors: {},
   setAuth: (token, username) => set({ token, username }),
   setStation: (station) => set({ station }),
   setTemplateAgents: (templateAgents) => set({ templateAgents }),
@@ -171,4 +180,9 @@ export const useCouncilStore = create<CouncilState>((set) => ({
       return { streamingTokens: next };
     }),
   setAwaitingInputPrompt: (prompt) => set({ awaitingInputPrompt: prompt }),
+  setInitialLoad: (loaded) => set({ initialLoad: loaded }),
+  setLoading: (key, value) =>
+    set((state) => ({ loading: { ...state.loading, [key]: value } })),
+  setError: (key, value) =>
+    set((state) => ({ errors: { ...state.errors, [key]: value } })),
 }));

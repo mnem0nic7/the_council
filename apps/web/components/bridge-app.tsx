@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import type {
   MissionAction,
@@ -13,14 +13,14 @@ import type {
 } from "@the-council/contracts";
 
 import { api } from "../lib/api";
-import { getWsBaseUrl } from "../lib/config";
 import { type ReplayPayload, useCouncilStore } from "../lib/store";
+import { useBridgeData } from "../lib/hooks/use-bridge-data";
+import { useTelemetrySocket } from "../lib/hooks/use-telemetry-socket";
 import type { LoginState, MissionAgentEditorState, MissionDraftState } from "../lib/types/bridge";
 import {
   buildMissionAgentEditorState,
   buildNewMissionAgentEditorState,
   canEditMissionStructure,
-  cloneMissionAgents,
   missionDraftFromWorkspace,
   syncToolPolicyJson,
   toMissionAgentDefinition
@@ -54,6 +54,7 @@ export function BridgeApp() {
     templateWorkflows,
     missions,
     missionAgents,
+    missionWorkflow,
     missionRuns,
     telemetry,
     settings,
@@ -63,24 +64,14 @@ export function BridgeApp() {
     awaitingInputPrompt,
     setAuth,
     setStation,
-    setTemplateAgents,
-    setTemplateWorkflows,
-    setMissions,
     upsertMission,
-    setMissionAgents,
     upsertMissionAgent,
     removeMissionAgent,
     setMissionWorkflow,
-    setMissionRuns,
     upsertMissionRun,
-    setTelemetry,
-    appendTelemetry,
-    setSettings,
     setReplay,
     setSelectedMissionId,
     setSelectedRunId,
-    appendStreamToken,
-    clearStreamToken,
     setAwaitingInputPrompt
   } = useCouncilStore();
 
@@ -104,6 +95,23 @@ export function BridgeApp() {
   const selectedRun = missionRuns.find((run) => run.id === selectedRunId) ?? missionRuns[0];
   const structuralEditsAllowed = canEditMissionStructure(selectedMission);
 
+  // Track the last mission id for which editors were initialized
+  const editorInitMissionRef = useRef<string | null>(null);
+
+  // Delegate data fetching to hooks
+  useBridgeData({ token, selectedMissionId, selectedRunId });
+
+  // refreshRunContext is still used by action handlers and the socket onHydrate callback
+  async function refreshRunContext(authToken: string, missionId: string, runId: string) {
+    const [run, replayPayload] = await Promise.all([
+      api.getMissionRun(authToken, missionId, runId),
+      api.getReplay(authToken, missionId, runId)
+    ]);
+    upsertMissionRun(run);
+    setReplay(replayPayload as ReplayPayload);
+  }
+
+  // hydrateMissionContext is still used by action handlers (launch, dispatch, etc.)
   async function hydrateMissionContext(
     authToken: string,
     missionId: string,
@@ -117,15 +125,13 @@ export function BridgeApp() {
     ]);
 
     upsertMission(mission);
-    setMissionAgents(cloneMissionAgents(agents));
-    setMissionWorkflow(workflow);
-    setMissionRuns(runs);
-
-    const preferredRunId = runs.find((run) => run.id === selectedRunId)?.id;
-    const nextRunId = preferredRunId ?? mission.activeRunId ?? mission.latestRunId ?? runs[0]?.id ?? null;
-    if (nextRunId !== selectedRunId) {
-      setSelectedRunId(nextRunId);
-    }
+    setSelectedRunId(
+      runs.find((run) => run.id === selectedRunId)?.id ??
+        mission.activeRunId ??
+        mission.latestRunId ??
+        runs[0]?.id ??
+        null
+    );
 
     if (!refreshEditors) {
       return;
@@ -153,166 +159,66 @@ export function BridgeApp() {
     }
   }
 
-  async function refreshRunContext(authToken: string, missionId: string, runId: string) {
-    const [run, replayPayload] = await Promise.all([
-      api.getMissionRun(authToken, missionId, runId),
-      api.getReplay(authToken, missionId, runId)
-    ]);
-    upsertMissionRun(run);
-    setReplay(replayPayload as ReplayPayload);
-  }
-
+  // Initialize local editor state when the mission workspace data arrives in the store.
+  // This fires after useBridgeData populates missionWorkflow and missionAgents.
   useEffect(() => {
-    if (!token) {
+    if (!selectedMissionId || !missionWorkflow) {
+      if (!selectedMissionId) {
+        setMissionDraft(missionDraftFromWorkspace(null));
+        setMissionAgentEditor(null);
+        setWorkflowDraft(null);
+        setWorkflowJson("");
+        editorInitMissionRef.current = null;
+      }
       return;
     }
-    const authToken = token;
-    let closed = false;
-
-    async function load() {
-      try {
-        const [templateAgentData, workflowData, missionData, settingsData] = await Promise.all([
-          api.listAgents(authToken),
-          api.listWorkflows(authToken),
-          api.listMissions(authToken),
-          api.getSettings(authToken)
-        ]);
-        if (closed) {
-          return;
-        }
-        setTemplateAgents(templateAgentData);
-        setTemplateWorkflows(workflowData);
-        setMissions(missionData);
-        setSettings(settingsData);
-
-        if (!selectedMissionId && missionData[0]) {
-          setSelectedMissionId(missionData[0].id);
-        }
-      } catch (loadError) {
-        if (!closed) {
-          setError(loadError instanceof Error ? loadError.message : "Unable to load bridge data");
-        }
-      }
+    // Only reinitialize editors when the mission selection changes
+    if (editorInitMissionRef.current === selectedMissionId) {
+      return;
     }
+    editorInitMissionRef.current = selectedMissionId;
 
-    void load();
-    return () => {
-      closed = true;
-    };
-  }, [
-    selectedMissionId,
-    setMissions,
-    setSelectedMissionId,
-    setSettings,
-    setTemplateAgents,
-    setTemplateWorkflows,
-    token
-  ]);
+    const mission = missions.find((m) => m.id === selectedMissionId);
+    setMissionDraft(missionDraftFromWorkspace(mission ?? null));
+    setWorkflowDraft(cloneWorkflow(missionWorkflow));
+    setWorkflowJson(JSON.stringify(missionWorkflow, null, 2));
+    setImportTemplateId(
+      templateAgents.find(
+        (agent) => !missionAgents.some((missionAgent) => missionAgent.id === agent.id)
+      )?.id ?? ""
+    );
 
-  useEffect(() => {
-    if (!token || !selectedMissionId) {
-      setMissionDraft(missionDraftFromWorkspace(null));
+    if (missionAgents.length > 0) {
+      setSelectedMissionAgentId(missionAgents[0].id);
+      setMissionAgentEditorMode("edit");
+      setMissionAgentEditor(buildMissionAgentEditorState(missionAgents[0]));
+    } else if (settings && mission) {
+      setSelectedMissionAgentId(null);
+      setMissionAgentEditorMode("create");
+      setMissionAgentEditor(buildNewMissionAgentEditorState(settings, mission.id, []));
+    } else {
+      setSelectedMissionAgentId(null);
+      setMissionAgentEditorMode("create");
       setMissionAgentEditor(null);
-      setWorkflowDraft(null);
-      setWorkflowJson("");
-      return;
     }
-    let closed = false;
-    const authToken = token;
-    const missionId = selectedMissionId;
+  }, [selectedMissionId, missionWorkflow, missionAgents, missions, settings, templateAgents]);
 
-    async function loadMission() {
-      try {
-        await hydrateMissionContext(authToken, missionId, true);
-      } catch (loadError) {
-        if (!closed) {
-          setError(loadError instanceof Error ? loadError.message : "Unable to load mission workspace");
-        }
-      }
-    }
+  // onHydrate callback for the telemetry socket
+  const handleSocketHydrate = useCallback(
+    (missionId: string, runId: string) => {
+      if (!token) return;
+      void refreshRunContext(token, missionId, runId);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [token]
+  );
 
-    void loadMission();
-    return () => {
-      closed = true;
-    };
-  }, [selectedMissionId, token]);
-
-  useEffect(() => {
-    if (!token || !selectedMissionId || !selectedRunId) {
-      setReplay(null);
-      return;
-    }
-    let closed = false;
-    const authToken = token;
-    const missionId = selectedMissionId;
-    const runId = selectedRunId;
-
-    async function loadRun() {
-      try {
-        await refreshRunContext(authToken, missionId, runId);
-      } catch (runError) {
-        if (!closed) {
-          setError(runError instanceof Error ? runError.message : "Unable to load run replay");
-        }
-      }
-    }
-
-    void loadRun();
-    return () => {
-      closed = true;
-    };
-  }, [selectedMissionId, selectedRunId, token, setReplay, upsertMissionRun]);
-
-  useEffect(() => {
-    if (!token || !selectedRunId || !selectedMissionId) {
-      return;
-    }
-    const authToken = token;
-    const missionId = selectedMissionId;
-    const runId = selectedRunId;
-    let socket: WebSocket | null = new WebSocket(`${getWsBaseUrl()}/runs/${runId}?token=${authToken}`);
-
-    socket.onmessage = (event) => {
-      const payload = JSON.parse(event.data) as TelemetryEvent | { type: "history"; events: TelemetryEvent[] } | { type: "node.stream_token"; nodeId: string; token: string; sequence: number; runId: string };
-      if ("events" in payload) {
-        setTelemetry(payload.events);
-        void refreshRunContext(authToken, missionId, runId);
-        return;
-      }
-      const msg = payload as { type: string; [key: string]: unknown };
-      if (msg.type === "node.stream_token") {
-        appendStreamToken(msg.nodeId as string, msg.token as string);
-        return;
-      }
-      if (msg.type === "node.completed" && msg.nodeId) {
-        clearStreamToken(msg.nodeId as string);
-      }
-      if (msg.type === "node.awaiting_input") {
-        setAwaitingInputPrompt((msg as any).data?.prompt as string ?? "Operator input required");
-        appendTelemetry(msg as TelemetryEvent);
-        return;
-      }
-      appendTelemetry(payload as TelemetryEvent);
-      if (
-        msg.type === "mission.completed" ||
-        msg.type === "mission.failed" ||
-        msg.type === "mission.cancelled" ||
-        msg.type === "mission.operator_action"
-      ) {
-        void hydrateMissionContext(authToken, missionId, false);
-        void refreshRunContext(authToken, missionId, runId);
-      }
-    };
-
-    socket.onerror = () => {
-      setError("Mission telemetry link degraded");
-    };
-
-    return () => {
-      socket?.close();
-      socket = null;
-    };
-  }, [appendTelemetry, selectedMissionId, selectedRunId, setTelemetry, token, upsertMissionRun]);
+  useTelemetrySocket({
+    token,
+    missionId: selectedMissionId,
+    runId: selectedRunId,
+    onHydrate: handleSocketHydrate,
+  });
 
   const activeMissionCount = missions.filter((mission) =>
     ["queued", "running", "paused", "awaiting_input"].includes(mission.status)
