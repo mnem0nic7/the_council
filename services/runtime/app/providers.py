@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import Any
 
 from litellm import acompletion
 
+from app.core.config import get_settings
 from app.schemas import ProviderConfig
 
 
 class ProviderService:
+    def __init__(self) -> None:
+        settings = get_settings()
+        self._semaphore = asyncio.Semaphore(settings.max_concurrent_llm_calls)
+
     async def complete(
         self,
         provider: ProviderConfig,
@@ -35,7 +41,8 @@ class ProviderService:
             if api_key:
                 request["api_key"] = api_key
 
-        response = await acompletion(**request)
+        async with self._semaphore:
+            response = await acompletion(**request)
         return response.choices[0].message.content or ""
 
     def _scripted_response(self, system_prompt: str, user_prompt: str) -> str:

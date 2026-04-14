@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.core.config import get_settings
 from app.db import SessionLocal
@@ -332,7 +332,10 @@ class MissionExecutor:
         payload: dict[str, Any] = {"agentId": agent.id, "agentName": agent.name, "output": completion}
         if route:
             payload["route"] = route
-        await self._store_artifact(run_id, node.id, "agent-output", node.name, json.dumps(payload, indent=2))
+        await self._store_artifact(
+            run_id, node.id, "agent-output", node.name, json.dumps(payload, indent=2),
+            max_artifacts=agent.toolPolicy.maxArtifacts,
+        )
         self._store_memory(
             run_id,
             agent.id,
@@ -364,6 +367,7 @@ class MissionExecutor:
             f"{tool_name}-result",
             node.name,
             self.tools.artifact_payload(result),
+            max_artifacts=policy.maxArtifacts,
         )
         return NodeResult(payload={"agentId": agent.id, "tool": tool_name, "result": result, "missionId": mission_id})
 
@@ -462,12 +466,28 @@ class MissionExecutor:
                 return node.id
         return definition.nodes[-1].id
 
-    async def _store_artifact(self, run_id: str, node_id: str, kind: str, label: str, content: str) -> None:
+    async def _store_artifact(
+        self, run_id: str, node_id: str, kind: str, label: str, content: str, *, max_artifacts: int = 20
+    ) -> None:
         with SessionLocal() as session:
             run = session.get(MissionRun, run_id)
             if run is None:
                 return
             mission_id = run.mission_id
+            count = session.execute(
+                select(func.count()).select_from(Artifact).where(Artifact.run_id == run_id)
+            ).scalar()
+            if count >= max_artifacts:
+                self.telemetry.persist_event(
+                    session,
+                    mission_id,
+                    run_id,
+                    "node.artifact_limit_reached",
+                    f"Artifact limit of {max_artifacts} reached for run {run_id}; skipping store",
+                    severity="warning",
+                    node_id=node_id,
+                )
+                return
         stored = await self.storage.store_text(mission_id, run_id, node_id, kind, content)
         with SessionLocal() as session:
             artifact = Artifact(

@@ -544,3 +544,91 @@ def test_agent_crud_round_trip(client, auth_headers) -> None:
     remaining = client.get("/api/v1/agents", headers=auth_headers)
     remaining.raise_for_status()
     assert all(agent["id"] != "science-officer" for agent in remaining.json())
+
+
+# ---------------------------------------------------------------------------
+# Phase 7: Security & Enforcement tests
+# ---------------------------------------------------------------------------
+
+
+def test_path_traversal_blocked() -> None:
+    """7a: is_relative_to correctly rejects /tmp/foo from matching /tmp/foobar."""
+    from pathlib import Path
+
+    root = Path("/tmp/foobar").resolve()
+
+    # /tmp/foo/evil.txt is NOT inside /tmp/foobar
+    candidate = Path("/tmp/foo/evil.txt").resolve()
+    assert not candidate.is_relative_to(root)
+
+    # /tmp/foobar/file.txt IS inside /tmp/foobar
+    candidate2 = Path("/tmp/foobar/file.txt").resolve()
+    assert candidate2.is_relative_to(root)
+
+
+@pytest.mark.asyncio
+async def test_max_artifacts_enforced() -> None:
+    """7b: _store_artifact returns early (emitting a warning event) when limit is reached."""
+    from unittest.mock import MagicMock, patch
+
+    from app.executor import MissionExecutor
+    from app.telemetry import TelemetryHub
+
+    telemetry = MagicMock(spec=TelemetryHub)
+    telemetry.persist_event = MagicMock()
+    executor = MissionExecutor(telemetry)
+
+    with patch("app.executor.SessionLocal") as mock_session_class:
+        # Set up context manager
+        session_mock = MagicMock()
+        mock_session_class.return_value.__enter__ = MagicMock(return_value=session_mock)
+        mock_session_class.return_value.__exit__ = MagicMock(return_value=False)
+
+        # run.mission_id
+        run_mock = MagicMock()
+        run_mock.mission_id = "mission-1"
+        session_mock.get.return_value = run_mock
+
+        # artifact count at the limit
+        session_mock.execute.return_value.scalar.return_value = 20
+
+        await executor._store_artifact(
+            "run-1", "node-1", "agent-output", "Test Label", "content", max_artifacts=20
+        )
+
+    # persist_event should have been called exactly once with a warning
+    telemetry.persist_event.assert_called_once()
+    call_args = telemetry.persist_event.call_args
+    # positional args: session, mission_id, run_id, event_type, message
+    assert call_args[0][3] == "node.artifact_limit_reached"
+    assert call_args[1]["severity"] == "warning"
+
+
+def test_tool_output_truncated() -> None:
+    """7c: _truncate_result shortens text fields that exceed max_chars."""
+    runner = ToolRunner()
+    result = {"stdout": "a" * 1000, "returncode": 0}
+    truncated = runner._truncate_result(result, 100)
+    assert len(truncated["stdout"]) == 100
+    assert truncated["_truncated"] is True
+    assert truncated["returncode"] == 0
+
+
+def test_tool_output_not_truncated_when_short() -> None:
+    """7c: _truncate_result leaves short text fields unchanged."""
+    runner = ToolRunner()
+    result = {"stdout": "hello", "returncode": 0}
+    out = runner._truncate_result(result, 100)
+    assert out["stdout"] == "hello"
+    assert "_truncated" not in out
+
+
+@pytest.mark.asyncio
+async def test_provider_semaphore_limits_concurrency() -> None:
+    """7d: ProviderService initialises a semaphore from settings."""
+    from app.core.config import get_settings
+    from app.providers import ProviderService
+
+    settings = get_settings()
+    service = ProviderService()
+    assert service._semaphore._value == settings.max_concurrent_llm_calls
