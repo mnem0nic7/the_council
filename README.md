@@ -21,6 +21,10 @@ The default operator account is `captain` / `bridge123`.
 
 ## Cockpit UX
 
+- Command Deck is mission-first: create/select a mission workspace, edit its defaults, launch mission runs, and watch run telemetry from the same station.
+- Engineering is mission-scoped: import global template agents into the selected mission as editable copies, or forge mission-local agents from scratch.
+- Tactical edits the selected mission workflow, not the global template library. The node/edge editor and raw JSON stay synchronized against the same mission workflow definition.
+- Crew and Archive default to the selected mission’s active or latest run.
 - Engineering has a desktop-only draggable divider between the Agent Registry and Agent Forge.
 - Command Deck has a desktop-only draggable divider between mission launch controls and live telemetry.
 - Both resizers persist width locally per browser session, support keyboard nudging, and reset on double-click.
@@ -29,6 +33,10 @@ The default operator account is `captain` / `bridge123`.
 
 ## Runtime Notes
 
+- Missions are editable workspaces. Runs are child execution records with their own workflow snapshot, mission-agent snapshot, telemetry stream, replay, artifacts, and memory.
+- Mission workflow nodes bind to mission-local agent ids. Importing a global agent template into a mission always creates an isolated mission-local copy.
+- Only one active run is allowed per mission in v1. Structural mission edits are blocked unless there is no active run or the active run is paused.
+- When a paused run is edited structurally, the runtime updates both the paused run snapshot and the mission workspace default so future runs inherit the same changes.
 - Telemetry uses local websocket fanout by default and upgrades to Redis pub/sub automatically when `REDIS_URL` is reachable.
 - Artifact storage writes to the local filesystem by default and uploads to an S3-compatible object store when `OBJECT_STORE_*` settings are provided.
 - The provided Docker Compose stack enables Redis telemetry and MinIO-backed artifact storage out of the box.

@@ -54,6 +54,12 @@ export const AgentDefinitionSchema = z.object({
 });
 export type AgentDefinition = z.infer<typeof AgentDefinitionSchema>;
 
+export const MissionAgentDefinitionSchema = AgentDefinitionSchema.extend({
+  missionId: z.string(),
+  templateAgentId: z.string().optional()
+});
+export type MissionAgentDefinition = z.infer<typeof MissionAgentDefinitionSchema>;
+
 export const WorkflowNodeTypeSchema = z.enum([
   "agent",
   "tool",
@@ -136,9 +142,37 @@ export const MissionStatusSchema = z.enum([
 ]);
 export type MissionStatus = z.infer<typeof MissionStatusSchema>;
 
+export const MissionWorkspaceStatusSchema = z.enum([
+  "draft",
+  "queued",
+  "running",
+  "paused",
+  "awaiting_input",
+  "completed",
+  "failed",
+  "cancelled"
+]);
+export type MissionWorkspaceStatus = z.infer<typeof MissionWorkspaceStatusSchema>;
+
+export const MissionWorkspaceSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  description: z.string().default(""),
+  status: MissionWorkspaceStatusSchema,
+  templateWorkflowId: z.string().optional(),
+  workflowDefinition: WorkflowDefinitionSchema,
+  defaultInput: z.record(z.any()).default({}),
+  defaultProviderOverrides: z.record(z.any()).default({}),
+  activeRunId: z.string().optional(),
+  latestRunId: z.string().optional(),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime()
+});
+export type MissionWorkspace = z.infer<typeof MissionWorkspaceSchema>;
+
 export const MissionRunSchema = z.object({
   id: z.string(),
-  workflowId: z.string(),
+  missionId: z.string(),
   name: z.string(),
   status: MissionStatusSchema,
   input: z.record(z.any()).default({}),
@@ -158,6 +192,7 @@ export type TelemetrySeverity = z.infer<typeof TelemetrySeveritySchema>;
 export const TelemetryEventSchema = z.object({
   id: z.string(),
   missionId: z.string(),
+  runId: z.string(),
   sequence: z.number().int().nonnegative(),
   type: z.string(),
   severity: TelemetrySeveritySchema,
@@ -172,6 +207,7 @@ export type TelemetryEvent = z.infer<typeof TelemetryEventSchema>;
 export const MemoryRecordSchema = z.object({
   id: z.string(),
   missionId: z.string().optional(),
+  runId: z.string().optional(),
   agentId: z.string().optional(),
   namespace: z.string(),
   content: z.string(),
@@ -184,6 +220,7 @@ export type MemoryRecord = z.infer<typeof MemoryRecordSchema>;
 export const ArtifactRecordSchema = z.object({
   id: z.string(),
   missionId: z.string(),
+  runId: z.string(),
   nodeId: z.string().optional(),
   kind: z.string(),
   label: z.string(),

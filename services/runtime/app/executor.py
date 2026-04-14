@@ -6,21 +6,22 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.db import SessionLocal
-from app.models import Agent, Artifact, MemoryRecord, Mission, OperatorAction, Workflow
+from app.migrations import default_control_state
+from app.models import Artifact, MemoryRecord, Mission, MissionAgent, MissionRun, OperatorAction
 from app.providers import ProviderService
-from app.schemas import AgentDefinition, ProviderConfig, ToolPolicy, WorkflowDefinition
+from app.schemas import MissionAgentDefinition, ProviderConfig, ToolPolicy, WorkflowDefinition, WorkflowNode
 from app.storage import ArtifactStorage
 from app.telemetry import TelemetryHub
 from app.tools import ToolPolicyError, ToolRunner
 
 TEMPLATE_PATTERN = re.compile(r"{{\s*([^}]+)\s*}}")
+ACTIVE_RUN_STATUSES = {"queued", "running", "paused", "awaiting_input"}
 
 
 @dataclass
@@ -41,153 +42,202 @@ class MissionExecutor:
         self.storage = ArtifactStorage()
         self.tasks: dict[str, asyncio.Task[None]] = {}
 
-    def start(self, mission_id: str) -> None:
-        if mission_id not in self.tasks or self.tasks[mission_id].done():
-            self.tasks[mission_id] = asyncio.create_task(self.run(mission_id))
+    def start(self, run_id: str) -> None:
+        if run_id not in self.tasks or self.tasks[run_id].done():
+            self.tasks[run_id] = asyncio.create_task(self.run(run_id))
 
-    async def run(self, mission_id: str) -> None:
+    async def run(self, run_id: str) -> None:
+        first_start = False
         with SessionLocal() as session:
-            mission = session.get(Mission, mission_id)
+            run = session.get(MissionRun, run_id)
+            if run is None:
+                return
+            mission = session.get(Mission, run.mission_id)
             if mission is None:
                 return
-            mission.status = "running"
-            mission.started_at = datetime.now(UTC)
+            if run.status in {"completed", "failed", "cancelled"} and not (run.control_state or {}).get("paused"):
+                return
+            if run.started_at is None:
+                run.started_at = datetime.now(UTC)
+                first_start = True
+            if not (run.control_state or {}).get("paused"):
+                run.status = "running"
+            sync_mission_from_run(mission, run)
             session.commit()
-            self.telemetry.persist_event(session, mission_id, "mission.started", "Mission launched")
+            if first_start:
+                self.telemetry.persist_event(session, mission.id, run.id, "mission.started", "Mission launched")
 
         try:
-            await self._execute_workflow(mission_id)
+            await self._execute_workflow(run_id)
         except MissionCancelled:
             with SessionLocal() as session:
-                mission = session.get(Mission, mission_id)
-                if mission:
-                    mission.status = "cancelled"
-                    mission.completed_at = datetime.now(UTC)
-                    mission.current_nodes = []
-                    session.commit()
-                    self.telemetry.persist_event(
-                        session, mission_id, "mission.cancelled", "Mission cancelled by operator", severity="warning"
-                    )
-        except Exception as exc:  # noqa: BLE001
-            with SessionLocal() as session:
-                mission = session.get(Mission, mission_id)
-                if mission:
-                    mission.status = "failed"
-                    mission.completed_at = datetime.now(UTC)
-                    mission.current_nodes = []
-                    session.commit()
-                    self.telemetry.persist_event(
-                        session,
-                        mission_id,
-                        "mission.failed",
-                        f"Mission failed: {exc}",
-                        severity="error",
-                        data={"error": str(exc)},
-                    )
-        finally:
-            self.tasks.pop(mission_id, None)
-
-    async def _execute_workflow(self, mission_id: str) -> None:
-        with SessionLocal() as session:
-            mission = session.get(Mission, mission_id)
-            workflow = session.get(Workflow, mission.workflow_id)
-            definition = WorkflowDefinition.model_validate(workflow.definition)
-            adjacency = {node.id: [] for node in definition.nodes}
-            predecessors = {node.id: set() for node in definition.nodes}
-            edge_lookup = {}
-            for edge in definition.edges:
-                adjacency[edge.source].append(edge)
-                predecessors[edge.target].add(edge.source)
-                edge_lookup[(edge.source, edge.target)] = edge
-            results: dict[str, dict[str, Any]] = {}
-            completed: set[str] = set()
-            ready = [node.id for node in definition.nodes if not predecessors[node.id]]
-
-        node_map = {node.id: node for node in definition.nodes}
-        while ready:
-            await self._wait_if_paused(mission_id)
-            batch = ready
-            ready = []
-            with SessionLocal() as session:
-                mission = session.get(Mission, mission_id)
+                run = session.get(MissionRun, run_id)
+                if run is None:
+                    return
+                mission = session.get(Mission, run.mission_id)
                 if mission is None:
                     return
-                if mission.control_state.get("cancelled"):
-                    raise MissionCancelled()
-                mission.current_nodes = batch
+                run.status = "cancelled"
+                run.completed_at = datetime.now(UTC)
+                run.current_nodes = []
+                sync_mission_from_run(mission, run)
                 session.commit()
                 self.telemetry.persist_event(
                     session,
-                    mission_id,
+                    mission.id,
+                    run.id,
+                    "mission.cancelled",
+                    "Mission cancelled by operator",
+                    severity="warning",
+                )
+        except Exception as exc:  # noqa: BLE001
+            with SessionLocal() as session:
+                run = session.get(MissionRun, run_id)
+                if run is None:
+                    return
+                mission = session.get(Mission, run.mission_id)
+                if mission is None:
+                    return
+                run.status = "failed"
+                run.completed_at = datetime.now(UTC)
+                run.current_nodes = []
+                sync_mission_from_run(mission, run)
+                session.commit()
+                self.telemetry.persist_event(
+                    session,
+                    mission.id,
+                    run.id,
+                    "mission.failed",
+                    f"Mission failed: {exc}",
+                    severity="error",
+                    data={"error": str(exc)},
+                )
+        finally:
+            self.tasks.pop(run_id, None)
+
+    async def _execute_workflow(self, run_id: str) -> None:
+        while True:
+            await self._wait_if_paused(run_id)
+            with SessionLocal() as session:
+                run = session.get(MissionRun, run_id)
+                if run is None:
+                    return
+                mission = session.get(Mission, run.mission_id)
+                if mission is None:
+                    return
+                if (run.control_state or {}).get("cancelled"):
+                    raise MissionCancelled()
+
+                definition = WorkflowDefinition.model_validate(run.workflow_snapshot)
+                state = copy.deepcopy(run.execution_state or {})
+                results = copy.deepcopy(state.get("results", {}))
+                completed = set(state.get("completedNodes", []))
+                batch = self._ready_nodes(definition, completed, results)
+
+                if not batch:
+                    if len(completed) == len(definition.nodes):
+                        final_payload = {
+                            "results": results,
+                            "final": results.get(self._terminal_node_id(definition), {}),
+                        }
+                        run.status = "completed"
+                        run.completed_at = datetime.now(UTC)
+                        run.current_nodes = []
+                        run.output_payload = final_payload
+                        sync_mission_from_run(mission, run)
+                        session.commit()
+                        self.telemetry.persist_event(
+                            session,
+                            mission.id,
+                            run.id,
+                            "mission.completed",
+                            "Mission completed",
+                            data=final_payload,
+                        )
+                        return
+                    raise RuntimeError("Workflow reached a non-executable state")
+
+                node_map = {node.id: node for node in definition.nodes}
+                run.current_nodes = batch
+                run.status = "running"
+                sync_mission_from_run(mission, run)
+                session.commit()
+                self.telemetry.persist_event(
+                    session,
+                    mission.id,
+                    run.id,
                     "batch.started",
                     f"Executing nodes: {', '.join(batch)}",
                     data={"nodes": batch},
                 )
 
             batch_results = await asyncio.gather(
-                *(self._execute_node(mission_id, node_map[node_id], results) for node_id in batch)
-            )
-            next_candidates: set[str] = set()
-
-            for node_id, result in zip(batch, batch_results, strict=True):
-                completed.add(node_id)
-                results[node_id] = result.payload
-                for edge in adjacency[node_id]:
-                    if self._edge_allows(edge.condition, result):
-                        next_candidates.add(edge.target)
-
-            for candidate in next_candidates:
-                if candidate in completed:
-                    continue
-                if predecessors[candidate].issubset(completed):
-                    ready.append(candidate)
-
-        with SessionLocal() as session:
-            mission = session.get(Mission, mission_id)
-            if mission is None:
-                return
-            mission.status = "completed"
-            mission.completed_at = datetime.now(UTC)
-            mission.current_nodes = []
-            mission.output_payload = {
-                "results": results,
-                "final": results.get(self._terminal_node_id(definition), {}),
-            }
-            session.commit()
-            self.telemetry.persist_event(
-                session, mission_id, "mission.completed", "Mission completed", data=mission.output_payload
+                *(self._execute_node(run_id, node_map[node_id], results) for node_id in batch)
             )
 
-    async def _wait_if_paused(self, mission_id: str) -> None:
-        while True:
             with SessionLocal() as session:
-                mission = session.get(Mission, mission_id)
+                run = session.get(MissionRun, run_id)
+                if run is None:
+                    return
+                mission = session.get(Mission, run.mission_id)
                 if mission is None:
                     return
-                if mission.control_state.get("cancelled"):
+                next_state = copy.deepcopy(run.execution_state or {})
+                next_results = copy.deepcopy(next_state.get("results", {}))
+                next_completed = set(next_state.get("completedNodes", []))
+                for node_id, result in zip(batch, batch_results, strict=True):
+                    next_results[node_id] = result.payload
+                    next_completed.add(node_id)
+                run.execution_state = {
+                    "results": next_results,
+                    "completedNodes": sorted(next_completed),
+                }
+                run.current_nodes = []
+                sync_mission_from_run(mission, run)
+                session.commit()
+
+    async def _wait_if_paused(self, run_id: str) -> None:
+        while True:
+            with SessionLocal() as session:
+                run = session.get(MissionRun, run_id)
+                if run is None:
+                    return
+                mission = session.get(Mission, run.mission_id)
+                if mission is None:
+                    return
+                control_state = run.control_state or {}
+                if control_state.get("cancelled"):
                     raise MissionCancelled()
-                if not mission.control_state.get("paused"):
-                    if mission.status == "paused":
-                        mission.status = "running"
+                if not control_state.get("paused"):
+                    if run.status == "paused":
+                        run.status = "running"
+                        sync_mission_from_run(mission, run)
                         session.commit()
                     return
-                if mission.status != "paused":
-                    mission.status = "paused"
+                if run.status != "paused":
+                    run.status = "paused"
+                    sync_mission_from_run(mission, run)
                     session.commit()
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.25)
 
     async def _execute_node(
         self,
-        mission_id: str,
-        node,
+        run_id: str,
+        node: WorkflowNode,
         results: dict[str, dict[str, Any]],
     ) -> NodeResult:
         with SessionLocal() as session:
-            mission = session.get(Mission, mission_id)
-            context = {"mission": {"input": mission.input_payload, "control": mission.control_state}, "results": results}
+            run = session.get(MissionRun, run_id)
+            if run is None:
+                raise RuntimeError("Run not found")
+            mission = session.get(Mission, run.mission_id)
+            if mission is None:
+                raise RuntimeError("Mission not found")
+            context = {"mission": {"input": run.input_payload, "control": run.control_state}, "results": results}
             self.telemetry.persist_event(
                 session,
-                mission_id,
+                mission.id,
+                run.id,
                 "node.started",
                 f"{node.name} engaged",
                 node_id=node.id,
@@ -196,73 +246,68 @@ class MissionExecutor:
 
         try:
             if node.type == "agent":
-                result = await self._run_agent_node(mission_id, node, context)
+                result = await self._run_agent_node(run_id, node, context)
             elif node.type == "tool":
-                result = await self._run_tool_node(mission_id, node, context)
+                result = await self._run_tool_node(run_id, node, context)
             elif node.type == "router":
                 result = self._run_router_node(node, context)
             elif node.type == "parallel":
                 result = NodeResult(payload={"parallel": True, "node": node.id})
             elif node.type == "memory":
-                result = self._run_memory_node(mission_id, node, context)
+                result = self._run_memory_node(run_id, node, context)
             elif node.type == "delay":
                 result = await self._run_delay_node(node, context)
             elif node.type == "human_input":
-                result = self._run_human_input_node(node, context)
+                result = self._run_human_input_node(run_id, node, context)
             elif node.type == "terminal":
                 result = self._run_terminal_node(node, context)
             else:
                 raise RuntimeError(f"Unsupported node type: {node.type}")
         except Exception as exc:  # noqa: BLE001
             with SessionLocal() as session:
-                self.telemetry.persist_event(
-                    session,
-                    mission_id,
-                    "node.failed",
-                    f"{node.name} failed: {exc}",
-                    node_id=node.id,
-                    severity="error",
-                    data={"error": str(exc)},
-                )
+                run = session.get(MissionRun, run_id)
+                if run is not None:
+                    self.telemetry.persist_event(
+                        session,
+                        run.mission_id,
+                        run.id,
+                        "node.failed",
+                        f"{node.name} failed: {exc}",
+                        node_id=node.id,
+                        severity="error",
+                        data={"error": str(exc)},
+                    )
             raise
 
         with SessionLocal() as session:
-            self.telemetry.persist_event(
-                session,
-                mission_id,
-                "node.completed",
-                f"{node.name} complete",
-                node_id=node.id,
-                data=result.payload,
-            )
+            run = session.get(MissionRun, run_id)
+            if run is not None:
+                self.telemetry.persist_event(
+                    session,
+                    run.mission_id,
+                    run.id,
+                    "node.completed",
+                    f"{node.name} complete",
+                    node_id=node.id,
+                    data=result.payload,
+                )
         return result
 
-    async def _run_agent_node(self, mission_id: str, node, context: dict[str, Any]) -> NodeResult:
+    async def _run_agent_node(self, run_id: str, node: WorkflowNode, context: dict[str, Any]) -> NodeResult:
         with SessionLocal() as session:
-            agent = session.get(Agent, node.config["agentId"])
-            if agent is None:
-                raise RuntimeError(f"Agent {node.config['agentId']} not found")
-            agent_schema = AgentDefinition(
-                id=agent.id,
-                name=agent.name,
-                role=agent.role,
-                description=agent.description,
-                systemPrompt=agent.system_prompt,
-                provider=ProviderConfig.model_validate(agent.provider_config),
-                tools=agent.tools,
-                toolPolicy=ToolPolicy.model_validate(agent.tool_policy),
-                memoryProfile=agent.memory_profile,
-                handoffTargets=agent.handoff_targets,
-                createdAt=agent.created_at,
-                updatedAt=agent.updated_at,
-            )
-            mission = session.get(Mission, mission_id)
-            overrides = mission.provider_overrides or {}
+            run = session.get(MissionRun, run_id)
+            if run is None:
+                raise RuntimeError("Run not found")
+            mission = session.get(Mission, run.mission_id)
+            if mission is None:
+                raise RuntimeError("Mission not found")
+            agent = self._mission_agent_from_snapshot(run, node.config["agentId"])
+            overrides = run.provider_overrides or {}
             provider_override = overrides.get(node.id) or overrides.get(agent.id)
             provider = (
-                ProviderConfig.model_validate(provider_override) if provider_override else agent_schema.provider
+                ProviderConfig.model_validate(provider_override) if provider_override else agent.provider
             )
-            operator_notes = "\n".join(mission.control_state.get("retask_notes", []))
+            operator_notes = "\n".join((run.control_state or {}).get("retask_notes", []))
 
         prompt_template = node.config.get(
             "promptTemplate",
@@ -278,55 +323,63 @@ class MissionExecutor:
 
         completion = await self.providers.complete(
             provider,
-            system_prompt=agent_schema.systemPrompt,
+            system_prompt=agent.systemPrompt,
             user_prompt=prompt,
         )
         route = None
         if "ROUTE:" in completion:
             route = completion.split("ROUTE:", 1)[1].splitlines()[0].strip()
-        payload = {"agentId": agent.id, "agentName": agent.name, "output": completion}
-        await self._store_artifact(mission_id, node.id, "agent-output", node.name, json.dumps(payload, indent=2))
+        payload: dict[str, Any] = {"agentId": agent.id, "agentName": agent.name, "output": completion}
+        if route:
+            payload["route"] = route
+        await self._store_artifact(run_id, node.id, "agent-output", node.name, json.dumps(payload, indent=2))
         self._store_memory(
-            mission_id,
+            run_id,
             agent.id,
-            agent_schema.memoryProfile.namespace,
+            agent.memoryProfile.namespace,
             completion,
             tags=["agent", agent.role],
             metadata={"nodeId": node.id},
         )
         return NodeResult(payload=payload, route=route)
 
-    async def _run_tool_node(self, mission_id: str, node, context: dict[str, Any]) -> NodeResult:
+    async def _run_tool_node(self, run_id: str, node: WorkflowNode, context: dict[str, Any]) -> NodeResult:
         with SessionLocal() as session:
-            agent = session.get(Agent, node.config["agentId"])
-            if agent is None:
-                raise RuntimeError(f"Agent {node.config['agentId']} not found for tool execution")
-            mission = session.get(Mission, mission_id)
-            disabled_tools = set(mission.control_state.get("disabled_tools", []))
+            run = session.get(MissionRun, run_id)
+            if run is None:
+                raise RuntimeError("Run not found")
+            agent = self._mission_agent_from_snapshot(run, node.config["agentId"])
+            disabled_tools = set((run.control_state or {}).get("disabled_tools", []))
             tool_name = node.config["tool"]
             if tool_name in disabled_tools:
                 raise ToolPolicyError(f"Tool {tool_name} has been disabled by the operator")
-            policy = ToolPolicy.model_validate(agent.tool_policy)
+            policy = ToolPolicy.model_validate(agent.toolPolicy)
+            mission_id = run.mission_id
 
         rendered_args = self._render_value(node.config.get("args", {}), context)
-        result = await self.tools.run(tool_name, rendered_args, policy, mission_id)
+        result = await self.tools.run(tool_name, rendered_args, policy, run_id)
         await self._store_artifact(
-            mission_id, node.id, f"{tool_name}-result", node.name, self.tools.artifact_payload(result)
+            run_id,
+            node.id,
+            f"{tool_name}-result",
+            node.name,
+            self.tools.artifact_payload(result),
         )
-        return NodeResult(payload={"tool": tool_name, "result": result})
+        return NodeResult(payload={"agentId": agent.id, "tool": tool_name, "result": result, "missionId": mission_id})
 
-    def _run_router_node(self, node, context: dict[str, Any]) -> NodeResult:
+    def _run_router_node(self, node: WorkflowNode, context: dict[str, Any]) -> NodeResult:
         route = self._render_value(node.config.get("route", "{{mission.input.route}}"), context)
         if isinstance(route, dict):
             route = route.get("route")
-        return NodeResult(payload={"route": route}, route=str(route))
+        route_value = str(route)
+        return NodeResult(payload={"route": route_value}, route=route_value)
 
-    def _run_memory_node(self, mission_id: str, node, context: dict[str, Any]) -> NodeResult:
+    def _run_memory_node(self, run_id: str, node: WorkflowNode, context: dict[str, Any]) -> NodeResult:
         mode = node.config.get("mode", "write")
         namespace = node.config.get("namespace", get_settings().default_memory_namespace)
         if mode == "write":
             content = str(self._render_value(node.config.get("content", "{{results}}"), context))
-            self._store_memory(mission_id, None, namespace, content, tags=["workflow"], metadata={"nodeId": node.id})
+            self._store_memory(run_id, None, namespace, content, tags=["workflow"], metadata={"nodeId": node.id})
             return NodeResult(payload={"mode": mode, "namespace": namespace, "content": content})
 
         query = str(self._render_value(node.config.get("query", "{{mission.input.prompt}}"), context))
@@ -342,25 +395,66 @@ class MissionExecutor:
             }
         )
 
-    async def _run_delay_node(self, node, context: dict[str, Any]) -> NodeResult:
+    async def _run_delay_node(self, node: WorkflowNode, context: dict[str, Any]) -> NodeResult:
         seconds = float(self._render_value(node.config.get("seconds", 1), context))
         await asyncio.sleep(seconds)
         return NodeResult(payload={"seconds": seconds})
 
-    def _run_human_input_node(self, node, context: dict[str, Any]) -> NodeResult:
-        if "defaultInput" not in node.config:
-            raise RuntimeError("human_input nodes require defaultInput in v1 autonomous mode")
-        default_input = self._render_value(node.config["defaultInput"], context)
-        return NodeResult(payload={"input": default_input})
+    def _run_human_input_node(self, run_id: str, node: WorkflowNode, context: dict[str, Any]) -> NodeResult:
+        if "defaultInput" in node.config:
+            default_input = self._render_value(node.config["defaultInput"], context)
+            return NodeResult(payload={"input": default_input})
 
-    def _run_terminal_node(self, node, context: dict[str, Any]) -> NodeResult:
+        with SessionLocal() as session:
+            run = session.get(MissionRun, run_id)
+            if run is None:
+                raise RuntimeError("Run not found")
+            notes = (run.control_state or {}).get("retask_notes", [])
+        if notes:
+            return NodeResult(payload={"input": notes[-1]})
+        raise RuntimeError("human_input node requires defaultInput or operator retask notes")
+
+    def _run_terminal_node(self, node: WorkflowNode, context: dict[str, Any]) -> NodeResult:
         output = self._render_value(node.config.get("output", "{{results}}"), context)
         return NodeResult(payload={"terminal": True, "output": output})
 
-    def _edge_allows(self, condition: str | None, result: NodeResult) -> bool:
+    def _mission_agent_from_snapshot(self, run: MissionRun, mission_agent_id: str) -> MissionAgentDefinition:
+        for payload in run.agent_snapshot or []:
+            if payload.get("id") == mission_agent_id:
+                return MissionAgentDefinition.model_validate(payload)
+        raise RuntimeError(f"Mission agent {mission_agent_id} not found")
+
+    def _ready_nodes(
+        self,
+        definition: WorkflowDefinition,
+        completed: set[str],
+        results: dict[str, dict[str, Any]],
+    ) -> list[str]:
+        incoming: dict[str, list[Any]] = {node.id: [] for node in definition.nodes}
+        for edge in definition.edges:
+            incoming.setdefault(edge.target, []).append(edge)
+
+        ready: list[str] = []
+        for node in definition.nodes:
+            if node.id in completed:
+                continue
+            edges = incoming.get(node.id, [])
+            if not edges:
+                ready.append(node.id)
+                continue
+            sources = {edge.source for edge in edges}
+            if not sources.issubset(completed):
+                continue
+            if any(self._edge_allows(edge.condition, results.get(edge.source)) for edge in edges):
+                ready.append(node.id)
+        return ready
+
+    def _edge_allows(self, condition: str | None, result_payload: dict[str, Any] | None) -> bool:
         if condition is None:
             return True
-        return result.route == condition
+        if not isinstance(result_payload, dict):
+            return False
+        return str(result_payload.get("route")) == condition
 
     def _terminal_node_id(self, definition: WorkflowDefinition) -> str:
         for node in definition.nodes:
@@ -368,11 +462,17 @@ class MissionExecutor:
                 return node.id
         return definition.nodes[-1].id
 
-    async def _store_artifact(self, mission_id: str, node_id: str, kind: str, label: str, content: str) -> None:
-        stored = await self.storage.store_text(mission_id, node_id, kind, content)
+    async def _store_artifact(self, run_id: str, node_id: str, kind: str, label: str, content: str) -> None:
+        with SessionLocal() as session:
+            run = session.get(MissionRun, run_id)
+            if run is None:
+                return
+            mission_id = run.mission_id
+        stored = await self.storage.store_text(mission_id, run_id, node_id, kind, content)
         with SessionLocal() as session:
             artifact = Artifact(
                 mission_id=mission_id,
+                run_id=run_id,
                 node_id=node_id,
                 kind=kind,
                 label=label,
@@ -385,8 +485,8 @@ class MissionExecutor:
 
     def _store_memory(
         self,
-        mission_id: str,
-        agent_id: str | None,
+        run_id: str,
+        mission_agent_id: str | None,
         namespace: str,
         content: str,
         *,
@@ -394,9 +494,14 @@ class MissionExecutor:
         metadata: dict[str, Any],
     ) -> None:
         with SessionLocal() as session:
+            run = session.get(MissionRun, run_id)
+            if run is None:
+                return
             record = MemoryRecord(
-                mission_id=mission_id,
-                agent_id=agent_id,
+                mission_id=run.mission_id,
+                run_id=run_id,
+                agent_id=mission_agent_id,
+                mission_agent_id=mission_agent_id,
                 namespace=namespace,
                 content=content,
                 tags=tags,
@@ -436,15 +541,32 @@ class MissionExecutor:
         return sum(1 for term in query_terms if term in content.lower())
 
 
-def apply_operator_action(mission: Mission, action: str, payload: dict[str, Any]) -> None:
-    control_state = copy.deepcopy(mission.control_state or {})
+def sync_mission_from_run(mission: Mission, run: MissionRun) -> None:
+    mission.status = run.status
+    mission.input_payload = copy.deepcopy(run.input_payload or {})
+    mission.output_payload = copy.deepcopy(run.output_payload or {})
+    mission.current_nodes = copy.deepcopy(run.current_nodes or [])
+    mission.provider_overrides = copy.deepcopy(run.provider_overrides or {})
+    mission.control_state = copy.deepcopy(run.control_state or default_control_state())
+    mission.started_at = run.started_at
+    mission.completed_at = run.completed_at
+    mission.latest_run_id = run.id
+    mission.active_run_id = run.id if run.status in ACTIVE_RUN_STATUSES else None
+
+
+def apply_operator_action(run: MissionRun, action: str, payload: dict[str, Any]) -> None:
+    control_state = copy.deepcopy(run.control_state or default_control_state())
     control_state.setdefault("retask_notes", [])
     control_state.setdefault("disabled_tools", [])
 
     if action == "pause":
         control_state["paused"] = True
+        if run.status not in {"completed", "failed", "cancelled"}:
+            run.status = "paused"
     elif action == "resume":
         control_state["paused"] = False
+        if run.status == "paused":
+            run.status = "running"
     elif action == "cancel":
         control_state["cancelled"] = True
     elif action == "retask":
@@ -456,10 +578,10 @@ def apply_operator_action(mission: Mission, action: str, payload: dict[str, Any]
         if tool_name and tool_name not in control_state["disabled_tools"]:
             control_state["disabled_tools"].append(tool_name)
 
-    mission.control_state = control_state
+    run.control_state = control_state
 
 
-def record_operator_action(mission_id: str, action: str, payload: dict[str, Any]) -> None:
+def record_operator_action(mission_id: str, run_id: str, action: str, payload: dict[str, Any]) -> None:
     with SessionLocal() as session:
-        session.add(OperatorAction(mission_id=mission_id, action=action, payload=payload))
+        session.add(OperatorAction(mission_id=mission_id, run_id=run_id, action=action, payload=payload))
         session.commit()

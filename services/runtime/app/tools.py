@@ -21,25 +21,25 @@ class ToolRunner:
     def __init__(self) -> None:
         self.settings = get_settings()
 
-    async def run(self, tool_name: str, args: dict[str, Any], policy: ToolPolicy, mission_id: str) -> dict[str, Any]:
+    async def run(self, tool_name: str, args: dict[str, Any], policy: ToolPolicy, run_id: str) -> dict[str, Any]:
         if tool_name not in policy.allowedTools:
             raise ToolPolicyError(f"Tool {tool_name} is not allowed for this mission")
         if tool_name == "shell":
-            return await self._run_shell(args, policy, mission_id)
+            return await self._run_shell(args, policy, run_id)
         if tool_name == "filesystem":
-            return await self._run_filesystem(args, policy, mission_id)
+            return await self._run_filesystem(args, policy, run_id)
         if tool_name == "api":
             return await self._run_api(args, policy)
         if tool_name == "web":
             return await self._run_web(args, policy)
         raise ToolPolicyError(f"Unknown tool {tool_name}")
 
-    def _mission_workspace(self, mission_id: str) -> Path:
-        workspace = Path(self.settings.workspace_root) / mission_id
+    def _mission_workspace(self, run_id: str) -> Path:
+        workspace = Path(self.settings.workspace_root) / run_id
         workspace.mkdir(parents=True, exist_ok=True)
         return workspace
 
-    async def _run_shell(self, args: dict[str, Any], policy: ToolPolicy, mission_id: str) -> dict[str, Any]:
+    async def _run_shell(self, args: dict[str, Any], policy: ToolPolicy, run_id: str) -> dict[str, Any]:
         command = args.get("command", "")
         if not command:
             raise ToolPolicyError("Shell tool requires a command")
@@ -51,7 +51,7 @@ class ToolRunner:
 
         process = await asyncio.create_subprocess_shell(
             command,
-            cwd=str(self._mission_workspace(mission_id)),
+            cwd=str(self._mission_workspace(run_id)),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -69,10 +69,10 @@ class ToolRunner:
             "stderr": stderr.decode("utf-8", errors="replace"),
         }
 
-    async def _run_filesystem(self, args: dict[str, Any], policy: ToolPolicy, mission_id: str) -> dict[str, Any]:
+    async def _run_filesystem(self, args: dict[str, Any], policy: ToolPolicy, run_id: str) -> dict[str, Any]:
         action = args.get("action", "list")
         relative_path = args.get("path", ".")
-        workspace = self._mission_workspace(mission_id)
+        workspace = self._mission_workspace(run_id)
         candidate = (workspace / relative_path).resolve()
         allowed_roots = [Path(root).resolve() for root in policy.writableRoots] + [workspace.resolve()]
         if not any(str(candidate).startswith(str(root)) for root in allowed_roots):
@@ -138,4 +138,3 @@ class ToolRunner:
     @staticmethod
     def artifact_payload(result: dict[str, Any]) -> str:
         return json.dumps(result, indent=2, ensure_ascii=True)
-

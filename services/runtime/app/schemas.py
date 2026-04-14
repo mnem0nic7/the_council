@@ -55,6 +55,11 @@ class AgentDefinition(AgentBase):
     model_config = ConfigDict(from_attributes=True)
 
 
+class MissionAgentDefinition(AgentDefinition):
+    missionId: str
+    templateAgentId: str | None = None
+
+
 class WorkflowNode(BaseModel):
     id: str
     name: str
@@ -125,9 +130,31 @@ class WorkflowCreate(BaseModel):
     definition: WorkflowDefinition
 
 
-class MissionCreate(BaseModel):
-    workflowId: str
+class MissionWorkspaceCreate(BaseModel):
     name: str
+    description: str = ""
+    templateWorkflowId: str | None = None
+    defaultInput: dict[str, Any] = Field(default_factory=lambda: {"prompt": "", "route": "analysis"})
+    defaultProviderOverrides: dict[str, Any] = Field(default_factory=dict)
+
+
+class MissionWorkspaceUpdate(BaseModel):
+    name: str
+    description: str = ""
+    defaultInput: dict[str, Any] = Field(default_factory=lambda: {"prompt": "", "route": "analysis"})
+    defaultProviderOverrides: dict[str, Any] = Field(default_factory=dict)
+
+
+class MissionAgentImportRequest(BaseModel):
+    templateAgentId: str
+
+
+class MissionWorkflowUpdate(BaseModel):
+    definition: WorkflowDefinition
+
+
+class MissionRunCreate(BaseModel):
+    name: str | None = None
     input: dict[str, Any] = Field(default_factory=dict)
     providerOverrides: dict[str, Any] = Field(default_factory=dict)
 
@@ -137,9 +164,26 @@ class MissionActionRequest(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
+class MissionWorkspace(BaseModel):
+    id: str
+    name: str
+    description: str = ""
+    status: Literal["draft", "queued", "running", "paused", "awaiting_input", "completed", "failed", "cancelled"]
+    templateWorkflowId: str | None = None
+    workflowDefinition: WorkflowDefinition
+    defaultInput: dict[str, Any] = Field(default_factory=dict)
+    defaultProviderOverrides: dict[str, Any] = Field(default_factory=dict)
+    activeRunId: str | None = None
+    latestRunId: str | None = None
+    createdAt: datetime
+    updatedAt: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class MissionRun(BaseModel):
     id: str
-    workflowId: str
+    missionId: str
     name: str
     status: Literal["queued", "running", "paused", "awaiting_input", "completed", "failed", "cancelled"]
     input: dict[str, Any]
@@ -157,6 +201,7 @@ class MissionRun(BaseModel):
 class TelemetryEventRead(BaseModel):
     id: str
     missionId: str
+    runId: str
     sequence: int
     type: str
     severity: Literal["info", "warning", "error"]
@@ -170,6 +215,7 @@ class TelemetryEventRead(BaseModel):
 class ArtifactRecordRead(BaseModel):
     id: str
     missionId: str
+    runId: str
     nodeId: str | None = None
     kind: str
     label: str
@@ -182,6 +228,7 @@ class ArtifactRecordRead(BaseModel):
 class MemoryRecordRead(BaseModel):
     id: str
     missionId: str | None = None
+    runId: str | None = None
     agentId: str | None = None
     namespace: str
     content: str

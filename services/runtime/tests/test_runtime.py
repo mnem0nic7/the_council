@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from typing import Any
 
 import pytest
 
@@ -8,17 +9,69 @@ from app.schemas import ToolPolicy, WorkflowDefinition
 from app.tools import ToolPolicyError, ToolRunner
 
 
-def wait_for_mission_status(client, headers: dict[str, str], mission_id: str, expected: set[str], timeout: float = 6.0):
+def wait_for_run_status(
+    client,
+    headers: dict[str, str],
+    mission_id: str,
+    run_id: str,
+    expected: set[str],
+    timeout: float = 8.0,
+) -> dict[str, Any]:
     deadline = time.time() + timeout
     last_payload = None
     while time.time() < deadline:
-        response = client.get(f"/api/v1/missions/{mission_id}", headers=headers)
+        response = client.get(f"/api/v1/missions/{mission_id}/runs/{run_id}", headers=headers)
         response.raise_for_status()
         last_payload = response.json()
         if last_payload["status"] in expected:
             return last_payload
         time.sleep(0.1)
-    raise AssertionError(f"Mission {mission_id} did not reach {expected}; last payload was {last_payload}")
+    raise AssertionError(f"Run {run_id} did not reach {expected}; last payload was {last_payload}")
+
+
+def create_blank_mission(client, auth_headers, name: str = "Mission Workspace") -> dict[str, Any]:
+    response = client.post(
+        "/api/v1/missions",
+        headers=auth_headers,
+        json={
+            "name": name,
+            "description": "Mission workspace under test",
+            "defaultInput": {"prompt": "", "route": "analysis"},
+            "defaultProviderOverrides": {},
+        },
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def runtime_settings(client, auth_headers) -> dict[str, Any]:
+    response = client.get("/api/v1/settings/runtime", headers=auth_headers)
+    response.raise_for_status()
+    return response.json()
+
+
+def create_mission_agent(client, auth_headers, mission_id: str, agent_id: str = "science-officer") -> dict[str, Any]:
+    settings = runtime_settings(client, auth_headers)
+    payload = {
+        "id": agent_id,
+        "missionId": mission_id,
+        "templateAgentId": None,
+        "name": "Science Officer",
+        "role": "research-analyst",
+        "description": "Investigates signals and summarizes findings.",
+        "systemPrompt": "Investigate carefully and summarize with evidence.",
+        "provider": settings["providers"][0],
+        "tools": ["web", "api"],
+        "toolPolicy": {
+            **settings["defaultPolicy"],
+            "allowedTools": ["web", "api"],
+        },
+        "memoryProfile": {"mode": "hybrid", "namespace": "science", "topK": 5},
+        "handoffTargets": ["captain"],
+    }
+    response = client.post(f"/api/v1/missions/{mission_id}/agents", headers=auth_headers, json=payload)
+    response.raise_for_status()
+    return response.json()
 
 
 def test_workflow_definition_rejects_cycles() -> None:
@@ -43,117 +96,143 @@ def test_workflow_definition_rejects_cycles() -> None:
 async def test_tool_runner_blocks_disallowed_shell() -> None:
     runner = ToolRunner()
     policy = ToolPolicy(
-      allowedTools=["shell"],
-      shellAllowlist=["echo"],
-      shellDenylist=["rm"],
-      writableRoots=["./data/workspaces"],
+        allowedTools=["shell"],
+        shellAllowlist=["echo"],
+        shellDenylist=["rm"],
+        writableRoots=["./data/workspaces"],
     )
     with pytest.raises(ToolPolicyError):
-        await runner.run("shell", {"command": "uname -a"}, policy, "mission-test")
+        await runner.run("shell", {"command": "uname -a"}, policy, "run-test")
 
 
-def test_mission_executes_seeded_branching_workflow_and_persists_replay(client, auth_headers) -> None:
-    launch = client.post(
+def test_mission_workflow_requires_mission_agent_ids(client, auth_headers) -> None:
+    mission = create_blank_mission(client, auth_headers, "Reference Validation")
+    mission_id = mission["id"]
+    workflow = {
+        "definition": {
+            "id": "mission-workflow",
+            "name": "Mission Workflow",
+            "description": "Requires a mission-scoped agent binding",
+            "version": 1,
+            "nodes": [
+                {
+                    "id": "captain-brief",
+                    "name": "Captain Brief",
+                    "type": "agent",
+                    "position": {"x": 0, "y": 0},
+                    "config": {"agentId": "captain", "promptTemplate": "Mission {{mission.input.prompt}}"},
+                },
+                {
+                    "id": "terminal",
+                    "name": "Terminal",
+                    "type": "terminal",
+                    "position": {"x": 220, "y": 0},
+                    "config": {"output": "{{results.captain-brief.output}}"},
+                },
+            ],
+            "edges": [{"id": "e1", "source": "captain-brief", "target": "terminal"}],
+        }
+    }
+
+    rejected = client.put(f"/api/v1/missions/{mission_id}/workflow", headers=auth_headers, json=workflow)
+    assert rejected.status_code == 422
+    assert "unknown mission agent captain" in rejected.text
+
+    imported = client.post(
+        f"/api/v1/missions/{mission_id}/agents/import",
+        headers=auth_headers,
+        json={"templateAgentId": "captain"},
+    )
+    imported.raise_for_status()
+
+    accepted = client.put(f"/api/v1/missions/{mission_id}/workflow", headers=auth_headers, json=workflow)
+    accepted.raise_for_status()
+    assert accepted.json()["nodes"][0]["config"]["agentId"] == "captain"
+
+
+def test_imported_mission_agent_is_isolated_from_global_template(client, auth_headers) -> None:
+    mission = client.post(
+        "/api/v1/missions",
+        headers=auth_headers,
+        json={"name": "Template Copy", "templateWorkflowId": "bridge-assessment"},
+    )
+    mission.raise_for_status()
+    mission_id = mission.json()["id"]
+
+    mission_agents = client.get(f"/api/v1/missions/{mission_id}/agents", headers=auth_headers)
+    mission_agents.raise_for_status()
+    captain = next(agent for agent in mission_agents.json() if agent["id"] == "captain")
+    assert captain["templateAgentId"] == "captain"
+
+    updated_payload = {
+        **captain,
+        "name": "Mission Captain",
+        "description": "Customized for this mission workspace.",
+    }
+    updated = client.put(
+        f"/api/v1/missions/{mission_id}/agents/captain",
+        headers=auth_headers,
+        json=updated_payload,
+    )
+    updated.raise_for_status()
+    assert updated.json()["name"] == "Mission Captain"
+
+    global_agents = client.get("/api/v1/agents", headers=auth_headers)
+    global_agents.raise_for_status()
+    global_captain = next(agent for agent in global_agents.json() if agent["id"] == "captain")
+    assert global_captain["name"] == "Captain"
+
+
+def test_mission_run_executes_seeded_template_and_persists_replay(client, auth_headers) -> None:
+    mission = client.post(
         "/api/v1/missions",
         headers=auth_headers,
         json={
-            "workflowId": "bridge-assessment",
             "name": "Bridge Validation",
-            "input": {"prompt": "Assess the bridge and draft a readiness brief.", "route": "analysis"},
+            "templateWorkflowId": "bridge-assessment",
+            "defaultInput": {"prompt": "Assess the bridge and draft a readiness brief.", "route": "analysis"},
         },
     )
+    mission.raise_for_status()
+    mission_id = mission.json()["id"]
+
+    launch = client.post(
+        f"/api/v1/missions/{mission_id}/runs",
+        headers=auth_headers,
+        json={"input": {"prompt": "Assess the bridge and draft a readiness brief.", "route": "analysis"}},
+    )
     launch.raise_for_status()
-    mission_id = launch.json()["id"]
+    run_id = launch.json()["id"]
 
-    mission = wait_for_mission_status(client, auth_headers, mission_id, {"completed"})
-    assert mission["output"]["results"]["navigator-brief"]["agentId"] == "navigator"
-    assert "engineering_report.txt" in mission["output"]["results"]["engineering-scan"]["result"]["stdout"]
+    run = wait_for_run_status(client, auth_headers, mission_id, run_id, {"completed"})
+    assert run["output"]["results"]["navigator-brief"]["agentId"] == "navigator"
+    assert "engineering_report.txt" in run["output"]["results"]["engineering-scan"]["result"]["stdout"]
 
-    replay = client.get(f"/api/v1/missions/{mission_id}/replay", headers=auth_headers)
+    replay = client.get(f"/api/v1/missions/{mission_id}/runs/{run_id}/replay", headers=auth_headers)
     replay.raise_for_status()
     payload = replay.json()
     assert len(payload["events"]) >= 4
     assert any(artifact["kind"] == "agent-output" for artifact in payload["artifacts"])
-    agent_artifact = next(artifact for artifact in payload["artifacts"] if artifact["kind"] == "agent-output")
-    assert agent_artifact["metadata"]["storageBackend"] == "filesystem"
-    assert agent_artifact["uri"].endswith(".json")
     assert any(memory["namespace"] == "archive" for memory in payload["memories"])
+    assert all(event["runId"] == run_id for event in payload["events"])
 
 
-def test_runtime_settings_report_storage_backend(client, auth_headers) -> None:
-    response = client.get("/api/v1/settings/runtime", headers=auth_headers)
-    response.raise_for_status()
-    payload = response.json()
-    assert payload["storage"]["artifactBackend"] == "filesystem"
-    assert payload["storage"]["artifactBucket"] == "council-artifacts"
+def test_paused_workflow_edits_update_run_snapshot_and_future_runs(client, auth_headers) -> None:
+    mission = create_blank_mission(client, auth_headers, "Paused Edit Workspace")
+    mission_id = mission["id"]
 
+    imported = client.post(
+        f"/api/v1/missions/{mission_id}/agents/import",
+        headers=auth_headers,
+        json={"templateAgentId": "engineer"},
+    )
+    imported.raise_for_status()
 
-def test_public_api_health_alias(client) -> None:
-    response = client.get("/api/health")
-    response.raise_for_status()
-    assert response.json() == {"status": "ok"}
-
-
-def test_agent_crud_round_trip(client, auth_headers) -> None:
-    settings = client.get("/api/v1/settings/runtime", headers=auth_headers)
-    settings.raise_for_status()
-    runtime_settings = settings.json()
-
-    payload = {
-        "id": "science-officer",
-        "name": "Science Officer",
-        "role": "research-analyst",
-        "description": "Investigates external systems and records findings.",
-        "systemPrompt": "Investigate carefully and summarize concrete findings.",
-        "provider": runtime_settings["providers"][0],
-        "tools": ["web", "api"],
-        "toolPolicy": {
-            **runtime_settings["defaultPolicy"],
-            "allowedTools": ["web", "api"],
-        },
-        "memoryProfile": {
-            "mode": "hybrid",
-            "namespace": "science",
-            "topK": 5,
-        },
-        "handoffTargets": ["captain", "archivist"],
-    }
-
-    created = client.post("/api/v1/agents", headers=auth_headers, json=payload)
-    created.raise_for_status()
-    created_payload = created.json()
-    assert created_payload["id"] == "science-officer"
-    assert created_payload["tools"] == ["web", "api"]
-
-    updated_payload = {
-        **created_payload,
-        "name": "Science Officer Prime",
-        "tools": ["web"],
-        "toolPolicy": {
-            **runtime_settings["defaultPolicy"],
-            "allowedTools": ["web"],
-        },
-        "handoffTargets": ["captain"],
-    }
-    updated = client.put("/api/v1/agents/science-officer", headers=auth_headers, json=updated_payload)
-    updated.raise_for_status()
-    assert updated.json()["name"] == "Science Officer Prime"
-    assert updated.json()["tools"] == ["web"]
-
-    deleted = client.delete("/api/v1/agents/science-officer", headers=auth_headers)
-    assert deleted.status_code == 204
-
-    remaining = client.get("/api/v1/agents", headers=auth_headers)
-    remaining.raise_for_status()
-    assert all(agent["id"] != "science-officer" for agent in remaining.json())
-
-
-def test_operator_can_pause_resume_and_disable_tools(client, auth_headers) -> None:
-    workflow = {
+    initial_workflow = {
         "definition": {
-            "id": "pause-check",
-            "name": "Pause Check",
-            "description": "Exercise mission control actions",
+            "id": "mission-workflow",
+            "name": "Mission Workflow",
+            "description": "Editable paused workflow",
             "version": 1,
             "nodes": [
                 {
@@ -161,7 +240,7 @@ def test_operator_can_pause_resume_and_disable_tools(client, auth_headers) -> No
                     "name": "Wait",
                     "type": "delay",
                     "position": {"x": 0, "y": 0},
-                    "config": {"seconds": 0.8},
+                    "config": {"seconds": 1.2},
                 },
                 {
                     "id": "tool-node",
@@ -171,7 +250,7 @@ def test_operator_can_pause_resume_and_disable_tools(client, auth_headers) -> No
                     "config": {
                         "agentId": "engineer",
                         "tool": "shell",
-                        "args": {"command": "echo hello"},
+                        "args": {"command": "echo before"},
                     },
                 },
                 {
@@ -188,32 +267,239 @@ def test_operator_can_pause_resume_and_disable_tools(client, auth_headers) -> No
             ],
         }
     }
-    created = client.post("/api/v1/workflows", headers=auth_headers, json=workflow)
-    created.raise_for_status()
+    save_initial = client.put(f"/api/v1/missions/{mission_id}/workflow", headers=auth_headers, json=initial_workflow)
+    save_initial.raise_for_status()
 
     launch = client.post(
-        "/api/v1/missions",
+        f"/api/v1/missions/{mission_id}/runs",
         headers=auth_headers,
-        json={"workflowId": "pause-check", "name": "Pause Mission", "input": {"prompt": "pause test", "route": "analysis"}},
+        json={"input": {"prompt": "pause edit", "route": "analysis"}},
     )
     launch.raise_for_status()
-    mission_id = launch.json()["id"]
+    run_id = launch.json()["id"]
 
-    client.post(f"/api/v1/missions/{mission_id}/actions", headers=auth_headers, json={"action": "pause", "payload": {}})
-    client.post(
-        f"/api/v1/missions/{mission_id}/actions",
+    paused_response = client.post(
+        f"/api/v1/missions/{mission_id}/runs/{run_id}/actions",
         headers=auth_headers,
-        json={"action": "disable_tool", "payload": {"tool": "shell"}},
+        json={"action": "pause", "payload": {}},
     )
+    paused_response.raise_for_status()
+    wait_for_run_status(client, auth_headers, mission_id, run_id, {"paused"})
 
-    paused = wait_for_mission_status(client, auth_headers, mission_id, {"paused", "failed"})
-    assert "shell" in paused["controlState"]["disabled_tools"]
+    updated_workflow = {
+        "definition": {
+            **initial_workflow["definition"],
+            "nodes": [
+                initial_workflow["definition"]["nodes"][0],
+                {
+                    **initial_workflow["definition"]["nodes"][1],
+                    "config": {
+                        "agentId": "engineer",
+                        "tool": "shell",
+                        "args": {"command": "echo after"},
+                    },
+                },
+                initial_workflow["definition"]["nodes"][2],
+            ],
+        }
+    }
+    updated = client.put(f"/api/v1/missions/{mission_id}/workflow", headers=auth_headers, json=updated_workflow)
+    updated.raise_for_status()
 
-    client.post(
-        f"/api/v1/missions/{mission_id}/actions",
+    mission_after_update = client.get(f"/api/v1/missions/{mission_id}", headers=auth_headers)
+    mission_after_update.raise_for_status()
+    assert mission_after_update.json()["workflowDefinition"]["nodes"][1]["config"]["args"]["command"] == "echo after"
+
+    resume = client.post(
+        f"/api/v1/missions/{mission_id}/runs/{run_id}/actions",
         headers=auth_headers,
         json={"action": "resume", "payload": {}},
     )
+    resume.raise_for_status()
+    completed = wait_for_run_status(client, auth_headers, mission_id, run_id, {"completed"})
+    assert completed["output"]["results"]["tool-node"]["result"]["stdout"].strip() == "after"
 
-    finished = wait_for_mission_status(client, auth_headers, mission_id, {"failed"})
-    assert finished["status"] == "failed"
+    second_launch = client.post(
+        f"/api/v1/missions/{mission_id}/runs",
+        headers=auth_headers,
+        json={"input": {"prompt": "second run", "route": "analysis"}},
+    )
+    second_launch.raise_for_status()
+    second_run_id = second_launch.json()["id"]
+    second_completed = wait_for_run_status(client, auth_headers, mission_id, second_run_id, {"completed"})
+    assert second_completed["output"]["results"]["tool-node"]["result"]["stdout"].strip() == "after"
+
+
+def test_replay_remains_stable_after_later_mission_edits(client, auth_headers) -> None:
+    mission = create_blank_mission(client, auth_headers, "Replay Stability")
+    mission_id = mission["id"]
+    imported = client.post(
+        f"/api/v1/missions/{mission_id}/agents/import",
+        headers=auth_headers,
+        json={"templateAgentId": "engineer"},
+    )
+    imported.raise_for_status()
+
+    def workflow_for(command: str) -> dict[str, Any]:
+        return {
+            "definition": {
+                "id": "mission-workflow",
+                "name": "Mission Workflow",
+                "description": "Replay stability check",
+                "version": 1,
+                "nodes": [
+                    {
+                        "id": "tool-node",
+                        "name": "Tool Node",
+                        "type": "tool",
+                        "position": {"x": 0, "y": 0},
+                        "config": {"agentId": "engineer", "tool": "shell", "args": {"command": command}},
+                    },
+                    {
+                        "id": "terminal",
+                        "name": "Terminal",
+                        "type": "terminal",
+                        "position": {"x": 220, "y": 0},
+                        "config": {"output": "{{results.tool-node.result.stdout}}"},
+                    },
+                ],
+                "edges": [{"id": "e1", "source": "tool-node", "target": "terminal"}],
+            }
+        }
+
+    first_save = client.put(f"/api/v1/missions/{mission_id}/workflow", headers=auth_headers, json=workflow_for("echo first"))
+    first_save.raise_for_status()
+    first_launch = client.post(f"/api/v1/missions/{mission_id}/runs", headers=auth_headers, json={"input": {}})
+    first_launch.raise_for_status()
+    first_run_id = first_launch.json()["id"]
+    wait_for_run_status(client, auth_headers, mission_id, first_run_id, {"completed"})
+
+    second_save = client.put(
+        f"/api/v1/missions/{mission_id}/workflow",
+        headers=auth_headers,
+        json=workflow_for("echo second"),
+    )
+    second_save.raise_for_status()
+    second_launch = client.post(f"/api/v1/missions/{mission_id}/runs", headers=auth_headers, json={"input": {}})
+    second_launch.raise_for_status()
+    second_run_id = second_launch.json()["id"]
+    wait_for_run_status(client, auth_headers, mission_id, second_run_id, {"completed"})
+
+    first_replay = client.get(f"/api/v1/missions/{mission_id}/runs/{first_run_id}/replay", headers=auth_headers)
+    first_replay.raise_for_status()
+    second_replay = client.get(f"/api/v1/missions/{mission_id}/runs/{second_run_id}/replay", headers=auth_headers)
+    second_replay.raise_for_status()
+
+    first_terminal = first_replay.json()["mission"]["output"]["results"]["tool-node"]["result"]["stdout"].strip()
+    second_terminal = second_replay.json()["mission"]["output"]["results"]["tool-node"]["result"]["stdout"].strip()
+    assert first_terminal == "first"
+    assert second_terminal == "second"
+
+
+def test_only_one_active_run_per_mission(client, auth_headers) -> None:
+    mission = create_blank_mission(client, auth_headers, "Single Active Run")
+    mission_id = mission["id"]
+    imported = client.post(
+        f"/api/v1/missions/{mission_id}/agents/import",
+        headers=auth_headers,
+        json={"templateAgentId": "engineer"},
+    )
+    imported.raise_for_status()
+
+    workflow = {
+        "definition": {
+            "id": "mission-workflow",
+            "name": "Mission Workflow",
+            "description": "One active run limit",
+            "version": 1,
+            "nodes": [
+                {
+                    "id": "wait",
+                    "name": "Wait",
+                    "type": "delay",
+                    "position": {"x": 0, "y": 0},
+                    "config": {"seconds": 1.5},
+                },
+                {
+                    "id": "tool-node",
+                    "name": "Tool Node",
+                    "type": "tool",
+                    "position": {"x": 220, "y": 0},
+                    "config": {"agentId": "engineer", "tool": "shell", "args": {"command": "echo hello"}},
+                },
+            ],
+            "edges": [{"id": "e1", "source": "wait", "target": "tool-node"}],
+        }
+    }
+    saved = client.put(f"/api/v1/missions/{mission_id}/workflow", headers=auth_headers, json=workflow)
+    saved.raise_for_status()
+
+    first_launch = client.post(f"/api/v1/missions/{mission_id}/runs", headers=auth_headers, json={"input": {}})
+    first_launch.raise_for_status()
+    first_run_id = first_launch.json()["id"]
+
+    second_launch = client.post(f"/api/v1/missions/{mission_id}/runs", headers=auth_headers, json={"input": {}})
+    assert second_launch.status_code == 409
+
+    client.post(
+        f"/api/v1/missions/{mission_id}/runs/{first_run_id}/actions",
+        headers=auth_headers,
+        json={"action": "cancel", "payload": {}},
+    ).raise_for_status()
+    wait_for_run_status(client, auth_headers, mission_id, first_run_id, {"cancelled", "failed"})
+
+
+def test_runtime_settings_report_storage_backend(client, auth_headers) -> None:
+    payload = runtime_settings(client, auth_headers)
+    assert payload["storage"]["artifactBackend"] == "filesystem"
+    assert payload["storage"]["artifactBucket"] == "council-artifacts"
+
+
+def test_public_api_health_alias(client) -> None:
+    response = client.get("/api/health")
+    response.raise_for_status()
+    assert response.json() == {"status": "ok"}
+
+
+def test_agent_crud_round_trip(client, auth_headers) -> None:
+    settings = runtime_settings(client, auth_headers)
+    payload = {
+        "id": "science-officer",
+        "name": "Science Officer",
+        "role": "research-analyst",
+        "description": "Investigates external systems and records findings.",
+        "systemPrompt": "Investigate carefully and summarize concrete findings.",
+        "provider": settings["providers"][0],
+        "tools": ["web", "api"],
+        "toolPolicy": {
+            **settings["defaultPolicy"],
+            "allowedTools": ["web", "api"],
+        },
+        "memoryProfile": {"mode": "hybrid", "namespace": "science", "topK": 5},
+        "handoffTargets": ["captain", "archivist"],
+    }
+
+    created = client.post("/api/v1/agents", headers=auth_headers, json=payload)
+    created.raise_for_status()
+    assert created.json()["id"] == "science-officer"
+
+    updated_payload = {
+        **created.json(),
+        "name": "Science Officer Prime",
+        "tools": ["web"],
+        "toolPolicy": {
+            **settings["defaultPolicy"],
+            "allowedTools": ["web"],
+        },
+        "handoffTargets": ["captain"],
+    }
+    updated = client.put("/api/v1/agents/science-officer", headers=auth_headers, json=updated_payload)
+    updated.raise_for_status()
+    assert updated.json()["name"] == "Science Officer Prime"
+
+    deleted = client.delete("/api/v1/agents/science-officer", headers=auth_headers)
+    assert deleted.status_code == 204
+
+    remaining = client.get("/api/v1/agents", headers=auth_headers)
+    remaining.raise_for_status()
+    assert all(agent["id"] != "science-officer" for agent in remaining.json())

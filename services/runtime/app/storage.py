@@ -55,13 +55,14 @@ class ArtifactStorage:
     async def store_text(
         self,
         mission_id: str,
+        run_id: str,
         node_id: str,
         kind: str,
         content: str,
         *,
         content_type: str = "application/json",
     ) -> StoredArtifact:
-        artifact_dir = self.root / mission_id
+        artifact_dir = self.root / mission_id / run_id
         artifact_dir.mkdir(parents=True, exist_ok=True)
         file_name = f"{node_id}-{kind}.json"
         local_path = artifact_dir / file_name
@@ -73,7 +74,7 @@ class ArtifactStorage:
         if self._client is not None:
             try:
                 await self.ensure_ready()
-                object_name = f"{mission_id}/{file_name}"
+                object_name = f"{mission_id}/{run_id}/{file_name}"
                 await asyncio.to_thread(self._upload_bytes, object_name, content.encode("utf-8"), content_type)
                 uri = f"s3://{self.settings.object_store_bucket}/{object_name}"
                 metadata = {
