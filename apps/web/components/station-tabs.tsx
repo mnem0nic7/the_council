@@ -1,12 +1,13 @@
 "use client";
 
-import { stations, type StationId } from "../lib/utils/constants";
+import { type StationId } from "../lib/store";
+import { stations } from "../lib/utils/constants";
 
 export function StationTabs({
   station,
   onSetStation
 }: {
-  station: string;
+  station: StationId;
   onSetStation: (id: StationId) => void;
 }) {
   return (
@@ -15,7 +16,7 @@ export function StationTabs({
         <button
           key={entry.id}
           type="button"
-          onClick={() => onSetStation(entry.id as StationId)}
+          onClick={() => onSetStation(entry.id)}
           data-testid={`station-${entry.id}`}
           className={`rounded-full px-4 py-2 text-xs uppercase tracking-[0.22em] transition ${
             station === entry.id

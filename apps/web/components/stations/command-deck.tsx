@@ -10,16 +10,13 @@ import type {
 import { usePanelResize } from "../../lib/hooks/use-panel-resize";
 import type { MissionDraftState } from "../../lib/types/bridge";
 import {
+  clampCommandPanelWidth,
   commandPanelDefaultWidth,
   commandPanelMaxWidth,
   commandPanelMinWidth,
   commandPanelStorageKey
 } from "../../lib/utils/constants";
 import { PanelResizer } from "../ui/panel-resizer";
-
-function clampCommandPanelWidth(value: number): number {
-  return Math.min(commandPanelMaxWidth, Math.max(commandPanelMinWidth, value));
-}
 
 export function CommandDeck({
   busy,

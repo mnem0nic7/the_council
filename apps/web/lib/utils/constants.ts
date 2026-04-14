@@ -8,8 +8,6 @@ export const stations = [
   { id: "archive", label: "Archive" }
 ] as const;
 
-export type StationId = (typeof stations)[number]["id"];
-
 export const toolCatalog: Array<{ id: ToolName; label: string }> = [
   { id: "shell", label: "Shell" },
   { id: "filesystem", label: "Filesystem" },
@@ -35,3 +33,11 @@ export const commandPanelStorageKey = "council-command-left-panel-width";
 export const commandPanelDefaultWidth = 48;
 export const commandPanelMinWidth = 34;
 export const commandPanelMaxWidth = 62;
+
+export function clampCommandPanelWidth(value: number): number {
+  return Math.min(commandPanelMaxWidth, Math.max(commandPanelMinWidth, value));
+}
+
+export function clampEngineeringPanelWidth(value: number): number {
+  return Math.min(engineeringPanelMaxWidth, Math.max(engineeringPanelMinWidth, value));
+}

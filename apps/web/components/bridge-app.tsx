@@ -5,7 +5,10 @@ import { motion } from "framer-motion";
 import type {
   MissionAction,
   TelemetryEvent,
+  ToolName,
   WorkflowDefinition,
+  WorkflowEdge,
+  WorkflowNode,
   WorkflowNodeType
 } from "@the-council/contracts";
 
@@ -39,7 +42,7 @@ import { CrewStation } from "./stations/crew-station";
 import { EngineeringStation } from "./stations/engineering-station";
 import { TacticalStation } from "./stations/tactical-station";
 import { StationTabs } from "./station-tabs";
-import type { StationId } from "../lib/utils/constants";
+import { type StationId } from "../lib/store";
 import { CockpitScene } from "./cockpit-scene";
 
 export function BridgeApp() {
@@ -321,7 +324,7 @@ export function BridgeApp() {
     setWorkflowJson(JSON.stringify(next, null, 2));
   }
 
-  function patchWorkflowNode(nodeId: string, updater: (node: import("@the-council/contracts").WorkflowNode) => import("@the-council/contracts").WorkflowNode) {
+  function patchWorkflowNode(nodeId: string, updater: (node: WorkflowNode) => WorkflowNode) {
     if (!workflowDraft) {
       return;
     }
@@ -330,7 +333,7 @@ export function BridgeApp() {
     updateWorkflow(next);
   }
 
-  function patchWorkflowEdge(edgeId: string, updater: (edge: import("@the-council/contracts").WorkflowEdge) => import("@the-council/contracts").WorkflowEdge) {
+  function patchWorkflowEdge(edgeId: string, updater: (edge: WorkflowEdge) => WorkflowEdge) {
     if (!workflowDraft) {
       return;
     }
@@ -422,7 +425,7 @@ export function BridgeApp() {
     setMissionAgentEditor(buildMissionAgentEditorState(agent));
   }
 
-  function toggleMissionAgentTool(tool: import("@the-council/contracts").ToolName) {
+  function toggleMissionAgentTool(tool: ToolName) {
     setMissionAgentEditor((current) => {
       if (!current) {
         return current;
@@ -430,7 +433,7 @@ export function BridgeApp() {
       const nextTools = current.tools.includes(tool)
         ? current.tools.filter((entry) => entry !== tool)
         : [...current.tools, tool];
-      const tools = [...nextTools].sort() as import("@the-council/contracts").ToolName[];
+      const tools = [...nextTools].sort() as ToolName[];
       return {
         ...current,
         tools,

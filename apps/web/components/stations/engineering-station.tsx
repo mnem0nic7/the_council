@@ -11,6 +11,7 @@ import type {
 import { usePanelResize } from "../../lib/hooks/use-panel-resize";
 import type { MissionAgentEditorState } from "../../lib/types/bridge";
 import {
+  clampEngineeringPanelWidth,
   engineeringPanelDefaultWidth,
   engineeringPanelMaxWidth,
   engineeringPanelMinWidth,
@@ -18,10 +19,6 @@ import {
   toolCatalog
 } from "../../lib/utils/constants";
 import { PanelResizer } from "../ui/panel-resizer";
-
-function clampEngineeringPanelWidth(value: number): number {
-  return Math.min(engineeringPanelMaxWidth, Math.max(engineeringPanelMinWidth, value));
-}
 
 export function EngineeringStation({
   settings,
