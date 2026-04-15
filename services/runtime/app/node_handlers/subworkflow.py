@@ -70,7 +70,7 @@ class SubworkflowNodeHandler:
             except (KeyError, TypeError):
                 payload[key] = None
 
-        if not payload:
+        if not output_mapping:
             payload = sub_results
 
         return NodeResult(payload=payload)
