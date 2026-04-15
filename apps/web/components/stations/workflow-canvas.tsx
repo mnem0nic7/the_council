@@ -445,9 +445,10 @@ export function WorkflowCanvas({
               cursor: editsAllowed ? "grab" : "default"
             }}
             className={`rounded-2xl border bg-[rgba(5,18,31,0.92)] p-4 shadow-bridge select-none ${
-              selectedNodeId === node.id
-                ? "border-cyan-300/60 ring-1 ring-cyan-300/40"
-                : "border-white/10"
+              node.type === "subworkflow" ? "border-violet-400/50" :
+              node.type === "eval"        ? "border-amber-400/50" :
+              selectedNodeId === node.id  ? "border-cyan-300/60 ring-1 ring-cyan-300/40" :
+                                            "border-white/10"
             }`}
             onPointerDown={(e) => handleNodePointerDown(e, node.id)}
             onClick={(e) => handleNodeClick(e, node.id)}

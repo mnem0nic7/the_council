@@ -22,7 +22,9 @@ export const nodeTypeCatalog: Array<{ id: WorkflowNodeType; label: string }> = [
   { id: "memory", label: "Memory" },
   { id: "delay", label: "Delay" },
   { id: "human_input", label: "Human Input" },
-  { id: "terminal", label: "Terminal" }
+  { id: "terminal", label: "Terminal" },
+  { id: "subworkflow", label: "Sub-workflow" },
+  { id: "eval",        label: "Eval / Judge"  },
 ];
 
 export const engineeringPanelStorageKey = "council-engineering-left-panel-width";

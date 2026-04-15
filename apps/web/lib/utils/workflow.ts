@@ -42,6 +42,12 @@ export function defaultNodeConfig(type: WorkflowNodeType, missionAgentId?: strin
       defaultInput: "{{mission.input.prompt}}"
     };
   }
+  if (type === "subworkflow") {
+    return { workflowId: "", inputMapping: {}, outputMapping: {}, maxDepth: 3 };
+  }
+  if (type === "eval") {
+    return { targetNodeId: "", judgeAgentId: missionAgentId ?? "", rubric: "", passThreshold: 0.7, onFail: "continue" };
+  }
   return {
     output: "{{results}}"
   };
