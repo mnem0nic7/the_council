@@ -43,7 +43,7 @@ class MissionExecutor:
         self._register_handlers()
 
     def _register_handlers(self) -> None:
-        from app.node_handlers import agent, tool, router, parallel, memory, delay, human_input, terminal
+        from app.node_handlers import agent, tool, router, parallel, memory, delay, human_input, terminal, subworkflow
         agent.make_handler(self)
         tool.make_handler(self)
         router.make_handler(self)
@@ -52,6 +52,7 @@ class MissionExecutor:
         delay.make_handler(self)
         human_input.make_handler(self)
         terminal.make_handler(self)
+        subworkflow.make_handler(self)
 
     def start(self, run_id: str) -> None:
         if run_id not in self.tasks or self.tasks[run_id].done():
@@ -205,6 +206,32 @@ class MissionExecutor:
                 run.current_nodes = []
                 sync_mission_from_run(mission, run)
                 session.commit()
+
+    async def _execute_workflow_inline(
+        self,
+        run_id: str,
+        workflow,  # WorkflowDefinition
+        ctx: ExecutionContext,
+    ) -> dict[str, Any]:
+        """Execute a workflow definition against a pre-built context. Returns results dict."""
+        definition = workflow
+        completed: set[str] = set()
+        results: dict[str, Any] = dict(ctx.results)
+
+        while True:
+            batch = self._ready_nodes(definition, completed, results)
+            if not batch:
+                break
+            node_map = {node.id: node for node in definition.nodes}
+            batch_nodes = [node_map[nid] for nid in batch if nid in node_map]
+            batch_results = await asyncio.gather(
+                *(self._execute_node(run_id, node, results) for node in batch_nodes)
+            )
+            for nid, result in zip(batch, batch_results, strict=True):
+                results[nid] = result.payload
+                completed.add(nid)
+
+        return results
 
     async def _wait_if_paused(self, run_id: str) -> None:
         while True:

@@ -63,7 +63,7 @@ class MissionAgentDefinition(AgentDefinition):
 class WorkflowNode(BaseModel):
     id: str
     name: str
-    type: Literal["agent", "tool", "router", "parallel", "memory", "delay", "human_input", "terminal"]
+    type: Literal["agent", "tool", "router", "parallel", "memory", "delay", "human_input", "terminal", "subworkflow"]
     description: str = ""
     position: dict[str, float]
     config: dict[str, Any] = Field(default_factory=dict)

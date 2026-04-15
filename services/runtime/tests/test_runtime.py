@@ -1828,3 +1828,104 @@ async def test_parallel_map_join_any_cancels_remainder(monkeypatch):
     assert len(result.payload["results"]) == 1
     assert result.payload["results"][0]["output"] == "fast"
     assert result.route is None
+
+
+# ---------------------------------------------------------------------------
+# Phase 17: SubworkflowNodeHandler tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_subworkflow_depth_guard_raises():
+    """Raises RuntimeError when ctx.depth >= maxDepth."""
+    from app.node_handlers.subworkflow import SubworkflowNodeHandler
+    from app.node_handlers import ExecutionContext
+    from app.schemas import WorkflowNode
+
+    handler = SubworkflowNodeHandler(executor=None)
+    node = WorkflowNode(
+        id="sw1", name="Sub", type="subworkflow",
+        position={"x": 0, "y": 0},
+        config={"inline": {"nodes": [], "edges": []}, "maxDepth": 3},
+    )
+    ctx = ExecutionContext(
+        run_id="r1", mission_id="m1",
+        input_payload={}, control_state={}, execution_state={},
+        agent_snapshot=[], provider_overrides={},
+        results={}, depth=3,  # AT maxDepth
+    )
+    with pytest.raises(RuntimeError, match="depth limit"):
+        await handler.execute(node, ctx)
+
+
+@pytest.mark.asyncio
+async def test_subworkflow_maps_input_to_child_context(monkeypatch):
+    """inputMapping injects parent results into child execution context."""
+    from app.node_handlers.subworkflow import SubworkflowNodeHandler
+    from app.node_handlers import ExecutionContext
+    from app.schemas import WorkflowNode
+    from unittest.mock import AsyncMock, MagicMock
+
+    handler = SubworkflowNodeHandler(executor=None)
+
+    # Track what child_ctx was built with
+    captured_ctx = {}
+
+    async def fake_execute_inline(run_id, workflow, child_ctx, node_id_prefix=""):
+        captured_ctx.update({"input_payload": child_ctx.input_payload, "depth": child_ctx.depth})
+        return {}
+
+    handler._execute_inline = fake_execute_inline
+
+    node = WorkflowNode(
+        id="sw1", name="Sub", type="subworkflow",
+        position={"x": 0, "y": 0},
+        config={
+            "inline": {"nodes": [], "edges": []},
+            "inputMapping": {"prompt": "{{results.intake.output}}"},
+            "maxDepth": 3,
+        },
+    )
+    ctx = ExecutionContext(
+        run_id="r1", mission_id="m1",
+        input_payload={}, control_state={}, execution_state={},
+        agent_snapshot=[], provider_overrides={},
+        results={"intake": {"output": "hello from parent"}},
+        depth=0,
+    )
+    await handler.execute(node, ctx)
+    assert captured_ctx["input_payload"]["prompt"] == "hello from parent"
+    assert captured_ctx["depth"] == 1  # incremented
+
+
+@pytest.mark.asyncio
+async def test_subworkflow_maps_output_back(monkeypatch):
+    """outputMapping extracts terminal result into parent NodeResult payload."""
+    from app.node_handlers.subworkflow import SubworkflowNodeHandler
+    from app.node_handlers import ExecutionContext
+    from app.schemas import WorkflowNode
+
+    handler = SubworkflowNodeHandler(executor=None)
+
+    async def fake_execute_inline(run_id, workflow, child_ctx, node_id_prefix=""):
+        return {"sub_terminal": {"output": "summary result"}}
+
+    handler._execute_inline = fake_execute_inline
+
+    node = WorkflowNode(
+        id="sw1", name="Sub", type="subworkflow",
+        position={"x": 0, "y": 0},
+        config={
+            "inline": {"nodes": [], "edges": []},
+            "outputMapping": {"summary": "results.sub_terminal.output"},
+            "maxDepth": 3,
+        },
+    )
+    ctx = ExecutionContext(
+        run_id="r1", mission_id="m1",
+        input_payload={}, control_state={}, execution_state={},
+        agent_snapshot=[], provider_overrides={},
+        results={}, depth=0,
+    )
+    result = await handler.execute(node, ctx)
+    assert result.payload["summary"] == "summary result"
