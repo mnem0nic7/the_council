@@ -1715,4 +1715,116 @@ async def test_agent_node_handler_execute_produces_output(monkeypatch):
 
     assert result.payload["output"] == "hello world"
     assert result.payload["agentId"] == "a1"
+
+
+# ---------------------------------------------------------------------------
+# Task 8: Parallel fan_out
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_parallel_fanout_passes_results_to_context():
+    """Parallel node in fan_out mode returns input results so children can access them."""
+    from app.node_handlers.parallel import ParallelNodeHandler
+    from app.node_handlers import ExecutionContext, NodeResult
+    from app.schemas import WorkflowNode
+
+    handler = ParallelNodeHandler(executor=None)
+    node = WorkflowNode(id="p1", name="P", type="parallel", position={"x":0,"y":0}, config={"mode": "fan_out"})
+    ctx = ExecutionContext(
+        run_id="r1", mission_id="m1",
+        input_payload={}, control_state={}, execution_state={},
+        agent_snapshot=[], provider_overrides={},
+        results={"prev": {"output": "data"}},
+    )
+    result = await handler.execute(node, ctx)
+    assert result.payload["input"] == {"prev": {"output": "data"}}
+    assert result.payload["parallel"] is True
+
+
+# ---------------------------------------------------------------------------
+# Task 9: Parallel map mode
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_parallel_map_scatters_over_list(monkeypatch):
+    """Map mode spawns one sub-execution per item and gathers results."""
+    from app.node_handlers.parallel import ParallelNodeHandler
+    from app.node_handlers import ExecutionContext, NodeResult
+    from app.schemas import WorkflowNode
+
+    handler = ParallelNodeHandler(executor=None)
+
+    async def fake_execute_subgraph(node_ids, ctx):
+        item_value = ctx.results.get("_item", {}).get("value", "?")
+        return {"output": item_value.upper()}
+
+    handler._execute_subgraph = fake_execute_subgraph
+
+    node = WorkflowNode(
+        id="p1", name="P", type="parallel",
+        position={"x": 0, "y": 0},
+        config={
+            "mode": "map",
+            "inputPath": "results.extract.items",
+            "subgraph": ["process"],
+            "outputKey": "mapped",
+        }
+    )
+    ctx = ExecutionContext(
+        run_id="r1", mission_id="m1",
+        input_payload={}, control_state={}, execution_state={},
+        agent_snapshot=[], provider_overrides={},
+        results={"extract": {"items": ["a", "b", "c"]}},
+    )
+
+    result = await handler.execute(node, ctx)
+    assert result.payload["mapped"] == [
+        {"output": "A"},
+        {"output": "B"},
+        {"output": "C"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_parallel_map_join_any_cancels_remainder(monkeypatch):
+    """joinMode=any resolves on first completion and cancels the rest."""
+    import asyncio
+    from app.node_handlers.parallel import ParallelNodeHandler
+    from app.node_handlers import ExecutionContext
+    from app.schemas import WorkflowNode
+
+    handler = ParallelNodeHandler(executor=None)
+    executed_items = []
+
+    async def fake_execute_subgraph(node_ids, ctx):
+        item = ctx.results.get("_item", {}).get("value", "?")
+        executed_items.append(item)
+        if item == "slow":
+            await asyncio.sleep(10)  # will be cancelled
+        return {"output": item}
+
+    handler._execute_subgraph = fake_execute_subgraph
+
+    node = WorkflowNode(
+        id="p1", name="P", type="parallel",
+        position={"x": 0, "y": 0},
+        config={
+            "mode": "map",
+            "inputPath": "results.items.list",
+            "subgraph": ["step"],
+            "outputKey": "results",
+            "joinMode": "any",
+        }
+    )
+    ctx = ExecutionContext(
+        run_id="r1", mission_id="m1",
+        input_payload={}, control_state={}, execution_state={},
+        agent_snapshot=[], provider_overrides={},
+        results={"items": {"list": ["fast", "slow"]}},
+    )
+
+    result = await handler.execute(node, ctx)
+    # Only 1 result since joinMode=any stops on first completion
+    assert len(result.payload["results"]) == 1
+    assert result.payload["results"][0]["output"] == "fast"
     assert result.route is None
