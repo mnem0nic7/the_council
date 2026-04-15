@@ -1,22 +1,22 @@
-import Anthropic from "@anthropic-ai/sdk";
+import { GoogleGenerativeAI, SchemaType, type FunctionDeclaration, type Part } from "@google/generative-ai";
 import { NextResponse } from "next/server";
 
-const SYSTEM_PROMPT = `You are the Mission Builder AI for The Council — a starship agent mission control platform.
+const SYSTEM_INSTRUCTION = `You are the Mission Builder AI for The Council — a starship agent mission control platform.
 You help operators design and create missions, agents, and workflows through conversation.
 When the operator asks you to create something, use the appropriate tool.
 Always confirm what you created and explain what each piece does.
 Be concise and use the platform's military/space aesthetic in your language.`;
 
-const tools: Anthropic.Tool[] = [
+const functionDeclarations: FunctionDeclaration[] = [
   {
     name: "create_mission",
     description: "Create a new mission workspace",
-    input_schema: {
-      type: "object" as const,
+    parameters: {
+      type: SchemaType.OBJECT,
       properties: {
-        name: { type: "string", description: "Mission name" },
-        description: { type: "string", description: "What this mission does" },
-        prompt: { type: "string", description: "Default mission prompt / objective" }
+        name: { type: SchemaType.STRING, description: "Mission name" },
+        description: { type: SchemaType.STRING, description: "What this mission does" },
+        prompt: { type: SchemaType.STRING, description: "Default mission prompt / objective" }
       },
       required: ["name"]
     }
@@ -24,17 +24,17 @@ const tools: Anthropic.Tool[] = [
   {
     name: "create_mission_agent",
     description: "Add an agent to an existing mission",
-    input_schema: {
-      type: "object" as const,
+    parameters: {
+      type: SchemaType.OBJECT,
       properties: {
-        missionId: { type: "string", description: "ID of the mission to add the agent to" },
-        name: { type: "string", description: "Agent call sign / name" },
-        role: { type: "string", description: "Agent role (e.g. analyst, executor, coordinator)" },
-        systemPrompt: { type: "string", description: "System prompt that defines the agent's behaviour" },
+        missionId: { type: SchemaType.STRING, description: "ID of the mission to add the agent to" },
+        name: { type: SchemaType.STRING, description: "Agent call sign / name" },
+        role: { type: SchemaType.STRING, description: "Agent role (e.g. analyst, executor, coordinator)" },
+        systemPrompt: { type: SchemaType.STRING, description: "System prompt that defines the agent's behaviour" },
         tools: {
-          type: "array",
-          items: { type: "string", enum: ["shell", "filesystem", "web", "api"] },
-          description: "Tools the agent is allowed to use"
+          type: SchemaType.ARRAY,
+          items: { type: SchemaType.STRING },
+          description: "Tools the agent is allowed to use. Valid values: shell, filesystem, web, api"
         }
       },
       required: ["missionId", "name", "role", "systemPrompt"]
@@ -43,15 +43,16 @@ const tools: Anthropic.Tool[] = [
   {
     name: "create_template_agent",
     description: "Create a reusable template agent (not tied to a specific mission)",
-    input_schema: {
-      type: "object" as const,
+    parameters: {
+      type: SchemaType.OBJECT,
       properties: {
-        name: { type: "string" },
-        role: { type: "string" },
-        systemPrompt: { type: "string" },
+        name: { type: SchemaType.STRING, description: "Agent call sign / name" },
+        role: { type: SchemaType.STRING, description: "Agent role (e.g. analyst, executor, coordinator)" },
+        systemPrompt: { type: SchemaType.STRING, description: "System prompt that defines the agent's behaviour" },
         tools: {
-          type: "array",
-          items: { type: "string", enum: ["shell", "filesystem", "web", "api"] }
+          type: SchemaType.ARRAY,
+          items: { type: SchemaType.STRING },
+          description: "Tools the agent is allowed to use. Valid values: shell, filesystem, web, api"
         }
       },
       required: ["name", "role", "systemPrompt"]
@@ -90,13 +91,10 @@ export async function POST(req: Request) {
     };
 
     if (!token) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    if (!process.env.ANTHROPIC_API_KEY) {
-      return NextResponse.json({ error: "ANTHROPIC_API_KEY not configured" }, { status: 503 });
+    if (!process.env.GEMINI_KEY) {
+      return NextResponse.json({ error: "GEMINI_KEY not configured" }, { status: 503 });
     }
 
-    const client = new Anthropic();
-
-    // Fetch live context to ground Claude
     const [missionsResult, agentsResult, settingsResult] = await Promise.allSettled([
       backendRequest<{ id: string; name: string }[]>("/missions", token),
       backendRequest<{ id: string; name: string }[]>("/agents", token),
@@ -116,143 +114,142 @@ export async function POST(req: Request) {
       `Template agents: ${agentList.length > 0 ? agentList.map((a) => a.name).join(", ") : "none"}`
     ].join("\n");
 
-    const systemWithContext = `${SYSTEM_PROMPT}\n\nCurrent state:\n${contextNote}`;
+    const genAI = new GoogleGenerativeAI(process.env.GEMINI_KEY);
+    const model = genAI.getGenerativeModel({
+      model: "gemini-2.0-flash",
+      systemInstruction: `${SYSTEM_INSTRUCTION}\n\nCurrent state:\n${contextNote}`,
+      tools: [{ functionDeclarations }]
+    });
+
+    // Convert prior messages to Gemini history (all except the last user message)
+    const history = messages.slice(0, -1).map((m) => ({
+      role: m.role === "assistant" ? ("model" as const) : ("user" as const),
+      parts: [{ text: m.content }]
+    }));
+
+    const lastMessage = messages[messages.length - 1];
+    const chat = model.startChat({ history });
 
     const actionsPerformed: ActionPerformed[] = [];
     let finalText = "";
 
-    let loopMessages: Anthropic.MessageParam[] = messages.map((m) => ({
-      role: m.role,
-      content: m.content
-    }));
+    let result = await chat.sendMessage(lastMessage.content);
 
     for (let step = 0; step < 6; step++) {
-      const response = await client.messages.create({
-        model: "claude-sonnet-4-6",
-        max_tokens: 1024,
-        system: systemWithContext,
-        tools,
-        messages: loopMessages
-      });
+      const functionCalls = result.response.functionCalls();
 
-      if (response.stop_reason === "end_turn") {
-        finalText = response.content
-          .filter((b): b is Anthropic.TextBlock => b.type === "text")
-          .map((b) => b.text)
-          .join("");
+      if (!functionCalls || functionCalls.length === 0) {
+        finalText = result.response.text();
         break;
       }
 
-      if (response.stop_reason === "tool_use") {
-        const toolUseBlocks = response.content.filter(
-          (b): b is Anthropic.ToolUseBlock => b.type === "tool_use"
-        );
+      const functionResponses: Part[] = [];
 
-        loopMessages = [...loopMessages, { role: "assistant", content: response.content }];
+      for (const call of functionCalls) {
+        const input = call.args as Record<string, unknown>;
+        let response: unknown;
 
-        const toolResults: Anthropic.ToolResultBlockParam[] = [];
-
-        for (const toolUse of toolUseBlocks) {
-          const input = toolUse.input as Record<string, unknown>;
-          let result = "";
-          try {
-            if (toolUse.name === "create_mission") {
-              const created = await backendRequest<{ id: string; name: string }>(
-                "/missions",
-                token,
-                {
-                  method: "POST",
-                  body: JSON.stringify({
-                    name: input.name,
-                    description: input.description ?? "",
-                    defaultInput: { prompt: input.prompt ?? "" }
-                  })
-                }
-              );
-              actionsPerformed.push({ type: "mission", name: created.name });
-              result = JSON.stringify({ success: true, id: created.id, name: created.name });
-            } else if (toolUse.name === "create_mission_agent") {
-              const providerId = settingsData?.providers[0]?.id ?? "default";
-              const defaultPolicy = settingsData?.defaultPolicy ?? {};
-              const agentPayload = {
-                id: `agent-${Date.now()}`,
-                missionId: input.missionId,
-                name: input.name,
-                role: input.role,
-                description: "",
-                systemPrompt: input.systemPrompt,
-                provider: {
-                  id: providerId,
-                  label: providerId,
-                  mode: "hosted",
-                  model: "claude-sonnet-4-6",
-                  temperature: 0.2,
-                  maxTokens: 1200,
-                  enabled: true
-                },
-                tools: input.tools ?? [],
-                toolPolicy: { ...defaultPolicy, allowedTools: input.tools ?? [] },
-                memoryProfile: {
-                  mode: "hybrid",
-                  namespace: settingsData?.storage.memoryNamespace ?? "bridge",
-                  topK: 5
-                },
-                handoffTargets: []
-              };
-              const created = await backendRequest<{ id: string; name: string }>(
-                `/missions/${String(input.missionId)}/agents`,
-                token,
-                { method: "POST", body: JSON.stringify(agentPayload) }
-              );
-              actionsPerformed.push({ type: "mission_agent", name: created.name });
-              result = JSON.stringify({ success: true, id: created.id, name: created.name });
-            } else if (toolUse.name === "create_template_agent") {
-              const providerId = settingsData?.providers[0]?.id ?? "default";
-              const defaultPolicy = settingsData?.defaultPolicy ?? {};
-              const agentPayload = {
-                id: `template-agent-${Date.now()}`,
-                name: input.name,
-                role: input.role,
-                description: "",
-                systemPrompt: input.systemPrompt,
-                provider: {
-                  id: providerId,
-                  label: providerId,
-                  mode: "hosted",
-                  model: "claude-sonnet-4-6",
-                  temperature: 0.2,
-                  maxTokens: 1200,
-                  enabled: true
-                },
-                tools: input.tools ?? [],
-                toolPolicy: { ...defaultPolicy, allowedTools: input.tools ?? [] },
-                memoryProfile: {
-                  mode: "hybrid",
-                  namespace: settingsData?.storage.memoryNamespace ?? "bridge",
-                  topK: 5
-                },
-                handoffTargets: []
-              };
-              const created = await backendRequest<{ id: string; name: string }>(
-                "/agents",
-                token,
-                { method: "POST", body: JSON.stringify(agentPayload) }
-              );
-              actionsPerformed.push({ type: "template_agent", name: created.name });
-              result = JSON.stringify({ success: true, id: created.id, name: created.name });
-            }
-          } catch (toolErr) {
-            result = JSON.stringify({
-              success: false,
-              error: toolErr instanceof Error ? toolErr.message : "Tool failed"
-            });
+        try {
+          if (call.name === "create_mission") {
+            const created = await backendRequest<{ id: string; name: string }>(
+              "/missions",
+              token,
+              {
+                method: "POST",
+                body: JSON.stringify({
+                  name: input.name,
+                  description: input.description ?? "",
+                  defaultInput: { prompt: input.prompt ?? "" }
+                })
+              }
+            );
+            actionsPerformed.push({ type: "mission", name: created.name });
+            response = { success: true, id: created.id, name: created.name };
+          } else if (call.name === "create_mission_agent") {
+            const providerId = settingsData?.providers[0]?.id ?? "default";
+            const defaultPolicy = settingsData?.defaultPolicy ?? {};
+            const agentPayload = {
+              id: `agent-${Date.now()}`,
+              missionId: input.missionId,
+              name: input.name,
+              role: input.role,
+              description: "",
+              systemPrompt: input.systemPrompt,
+              provider: {
+                id: providerId,
+                label: providerId,
+                mode: "hosted",
+                model: "gemini-2.0-flash",
+                temperature: 0.2,
+                maxTokens: 1200,
+                enabled: true
+              },
+              tools: input.tools ?? [],
+              toolPolicy: { ...defaultPolicy, allowedTools: input.tools ?? [] },
+              memoryProfile: {
+                mode: "hybrid",
+                namespace: settingsData?.storage.memoryNamespace ?? "bridge",
+                topK: 5
+              },
+              handoffTargets: []
+            };
+            const created = await backendRequest<{ id: string; name: string }>(
+              `/missions/${String(input.missionId)}/agents`,
+              token,
+              { method: "POST", body: JSON.stringify(agentPayload) }
+            );
+            actionsPerformed.push({ type: "mission_agent", name: created.name });
+            response = { success: true, id: created.id, name: created.name };
+          } else if (call.name === "create_template_agent") {
+            const providerId = settingsData?.providers[0]?.id ?? "default";
+            const defaultPolicy = settingsData?.defaultPolicy ?? {};
+            const agentPayload = {
+              id: `template-agent-${Date.now()}`,
+              name: input.name,
+              role: input.role,
+              description: "",
+              systemPrompt: input.systemPrompt,
+              provider: {
+                id: providerId,
+                label: providerId,
+                mode: "hosted",
+                model: "gemini-2.0-flash",
+                temperature: 0.2,
+                maxTokens: 1200,
+                enabled: true
+              },
+              tools: input.tools ?? [],
+              toolPolicy: { ...defaultPolicy, allowedTools: input.tools ?? [] },
+              memoryProfile: {
+                mode: "hybrid",
+                namespace: settingsData?.storage.memoryNamespace ?? "bridge",
+                topK: 5
+              },
+              handoffTargets: []
+            };
+            const created = await backendRequest<{ id: string; name: string }>(
+              "/agents",
+              token,
+              { method: "POST", body: JSON.stringify(agentPayload) }
+            );
+            actionsPerformed.push({ type: "template_agent", name: created.name });
+            response = { success: true, id: created.id, name: created.name };
+          } else {
+            response = { success: false, error: `Unknown function: ${call.name}` };
           }
-
-          toolResults.push({ type: "tool_result", tool_use_id: toolUse.id, content: result });
+        } catch (toolErr) {
+          response = {
+            success: false,
+            error: toolErr instanceof Error ? toolErr.message : "Tool failed"
+          };
         }
 
-        loopMessages = [...loopMessages, { role: "user", content: toolResults }];
+        functionResponses.push({
+          functionResponse: { name: call.name, response: response as object }
+        });
       }
+
+      result = await chat.sendMessage(functionResponses);
     }
 
     return NextResponse.json({
