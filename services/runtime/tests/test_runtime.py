@@ -78,6 +78,28 @@ def create_mission_agent(client, auth_headers, mission_id: str, agent_id: str = 
     return response.json()
 
 
+def test_handler_registry_contains_all_node_types():
+    from app.node_handlers import get_handler
+    # The app-level executor registers all handlers at import time via main.py.
+    # Importing the app here ensures _register_handlers() has been called.
+    import app.main  # noqa: F401 — side effect: registers handlers
+    for node_type in ["agent", "tool", "router", "parallel", "memory", "delay", "human_input", "terminal"]:
+        handler = get_handler(node_type)
+        assert handler is not None, f"No handler for {node_type}"
+
+
+def test_unknown_node_type_raises():
+    from app.node_handlers import get_handler, _REGISTRY
+    # Clear any existing registry entries for this test
+    original = dict(_REGISTRY)
+    _REGISTRY.clear()
+    try:
+        with pytest.raises(KeyError, match="No handler registered"):
+            get_handler("nonexistent_type")
+    finally:
+        _REGISTRY.update(original)
+
+
 def test_workflow_definition_rejects_cycles() -> None:
     with pytest.raises(ValueError, match="acyclic"):
         WorkflowDefinition.model_validate(

@@ -6,7 +6,6 @@ import json
 import logging
 import re
 import traceback
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -22,17 +21,12 @@ from app.schemas import MissionAgentDefinition, ProviderConfig, ToolPolicy, Work
 from app.storage import ArtifactStorage
 from app.telemetry import TelemetryHub
 from app.tools import ToolPolicyError, ToolRunner
+from app.node_handlers import ExecutionContext, NodeResult, get_handler
 
 logger = logging.getLogger(__name__)
 
 TEMPLATE_PATTERN = re.compile(r"{{\s*([^}]+)\s*}}")
 ACTIVE_RUN_STATUSES = {"queued", "running", "paused", "awaiting_input"}
-
-
-@dataclass
-class NodeResult:
-    payload: dict[str, Any]
-    route: str | None = None
 
 
 class MissionCancelled(RuntimeError):
@@ -46,6 +40,18 @@ class MissionExecutor:
         self.tools = ToolRunner()
         self.storage = ArtifactStorage()
         self.tasks: dict[str, asyncio.Task[None]] = {}
+        self._register_handlers()
+
+    def _register_handlers(self) -> None:
+        from app.node_handlers import agent, tool, router, parallel, memory, delay, human_input, terminal
+        agent.make_handler(self)
+        tool.make_handler(self)
+        router.make_handler(self)
+        parallel.make_handler(self)
+        memory.make_handler(self)
+        delay.make_handler(self)
+        human_input.make_handler(self)
+        terminal.make_handler(self)
 
     def start(self, run_id: str) -> None:
         if run_id not in self.tasks or self.tasks[run_id].done():
@@ -315,6 +321,7 @@ class MissionExecutor:
         node: WorkflowNode,
         results: dict[str, dict[str, Any]],
     ) -> NodeResult:
+        ctx: ExecutionContext
         with SessionLocal() as session:
             run = session.get(MissionRun, run_id)
             if run is None:
@@ -322,7 +329,16 @@ class MissionExecutor:
             mission = session.get(Mission, run.mission_id)
             if mission is None:
                 raise RuntimeError("Mission not found")
-            context = {"mission": {"input": run.input_payload, "control": run.control_state}, "results": results}
+            ctx = ExecutionContext(
+                run_id=run_id,
+                mission_id=run.mission_id,
+                input_payload=run.input_payload or {},
+                control_state=run.control_state or {},
+                execution_state=run.execution_state or {},
+                agent_snapshot=run.agent_snapshot or [],
+                provider_overrides=run.provider_overrides or {},
+                results=results,
+            )
             self.telemetry.persist_event(
                 session,
                 mission.id,
@@ -334,24 +350,8 @@ class MissionExecutor:
             )
 
         try:
-            if node.type == "agent":
-                result = await self._run_agent_node(run_id, node, context)
-            elif node.type == "tool":
-                result = await self._run_tool_node(run_id, node, context)
-            elif node.type == "router":
-                result = self._run_router_node(node, context)
-            elif node.type == "parallel":
-                result = NodeResult(payload={"parallel": True, "node": node.id})
-            elif node.type == "memory":
-                result = await self._run_memory_node(run_id, node, context)
-            elif node.type == "delay":
-                result = await self._run_delay_node(node, context)
-            elif node.type == "human_input":
-                result = await self._run_human_input_node(run_id, node, context)
-            elif node.type == "terminal":
-                result = self._run_terminal_node(node, context)
-            else:
-                raise RuntimeError(f"Unsupported node type: {node.type}")
+            handler = get_handler(node.type)
+            result = await handler.execute(node, ctx)
         except Exception as exc:  # noqa: BLE001
             with SessionLocal() as session:
                 run = session.get(MissionRun, run_id)
