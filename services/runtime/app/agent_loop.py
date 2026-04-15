@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import jsonschema
+from litellm import acompletion
 
 from app.providers import ProviderService
 from app.schemas import MissionAgentDefinition, ProviderConfig, WorkflowNode
@@ -14,6 +15,32 @@ from app.telemetry import TelemetryHub
 from app.tools import ToolRunner
 
 logger = logging.getLogger(__name__)
+
+
+class FunctionDispatcher:
+    def __init__(self, tools: ToolRunner) -> None:
+        self.tools = tools
+
+    async def dispatch(
+        self,
+        function_name: str,
+        arguments: dict[str, Any],
+        handler_type: str,
+        run_id: str,
+        node_id: str,
+    ) -> str:
+        if handler_type == "tool_call":
+            tool_name = arguments.get("tool", function_name)
+            tool_args = arguments.get("args", arguments)
+            try:
+                result = await self.tools.run(tool_name, tool_args, policy=None, run_id=run_id)
+                return str(result)
+            except Exception as exc:
+                return f"Error: {exc}"
+        elif handler_type == "memory_search":
+            return f"[memory_search not yet implemented for query: {arguments.get('query', '')}]"
+        else:
+            return f"[unknown handler: {handler_type}]"
 
 
 @dataclass
@@ -64,6 +91,72 @@ class AgentLoop:
         Returns:
             LoopResult with completion text, detected ROUTE:, and any valid HANDOFF: target ids.
         """
+        # --- Native function-calling path ---
+        native_functions = node.config.get("nativeFunctions", [])
+        function_call_log: list[dict[str, Any]] = []
+
+        if native_functions:
+            lm_tools = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": fn["name"],
+                        "description": fn["description"],
+                        "parameters": fn.get("parameters", {}),
+                    },
+                }
+                for fn in native_functions
+            ]
+            fn_handler_map = {fn["name"]: fn.get("handler", "tool_call") for fn in native_functions}
+            dispatcher = FunctionDispatcher(self.tools)
+
+            loop_messages: list[dict] = [
+                {"role": "system", "content": agent.systemPrompt},
+                {"role": "user", "content": prompt},
+            ]
+
+            max_rounds = int(node.config.get("maxFunctionCallRounds", 5))
+            completion = ""
+
+            for _round in range(max_rounds):
+                response = await acompletion(
+                    model=provider.model,
+                    messages=loop_messages,
+                    tools=lm_tools,
+                )
+                msg = response.choices[0].message
+
+                if msg.tool_calls:
+                    loop_messages.append(
+                        {"role": "assistant", "tool_calls": [tc.model_dump() for tc in msg.tool_calls]}
+                    )
+                    for tc in msg.tool_calls:
+                        fn_name = tc.function.name
+                        fn_args = _json.loads(tc.function.arguments or "{}")
+                        handler_type = fn_handler_map.get(fn_name, "tool_call")
+                        fn_result = await dispatcher.dispatch(
+                            fn_name, fn_args, handler_type, run_id, node.id
+                        )
+                        loop_messages.append(
+                            {"role": "tool", "tool_call_id": tc.id, "content": fn_result}
+                        )
+                        function_call_log.append({"name": fn_name, "args": fn_args, "result": fn_result})
+                else:
+                    completion = msg.content or ""
+                    break
+            else:
+                logger.warning(
+                    "maxFunctionCallRounds=%d reached for node %s", max_rounds, node.id
+                )
+                completion = ""
+
+            # Detect ROUTE: and return early — skip the streaming section
+            route: str | None = None
+            if "ROUTE:" in completion:
+                route = completion.split("ROUTE:", 1)[1].splitlines()[0].strip()
+            return LoopResult(completion=completion, route=route, function_call_log=function_call_log)
+
+        # --- Streaming path (no nativeFunctions) ---
         chunks: list[str] = []
         seq = 0
 

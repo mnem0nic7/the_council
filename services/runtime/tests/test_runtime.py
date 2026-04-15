@@ -1486,3 +1486,144 @@ async def test_agent_loop_structured_output_invalid_reprompts(monkeypatch):
 
     assert call_count == 2  # first call failed, second succeeded
     assert result.structured == {"score": 0.5}
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_function_call_dispatched(monkeypatch):
+    """LLM tool_call response is dispatched and result fed back; loop terminates on text response."""
+    from app.agent_loop import AgentLoop
+    from unittest.mock import MagicMock, AsyncMock, patch
+    from app.schemas import WorkflowNode, MissionAgentDefinition, MemoryProfile, ProviderConfig, ToolPolicy
+    import json
+
+    call_count = 0
+
+    def make_tool_call_response():
+        tc = MagicMock()
+        tc.id = "call_1"
+        tc.function.name = "search"
+        tc.function.arguments = json.dumps({"query": "hello"})
+        msg = MagicMock()
+        msg.tool_calls = [tc]
+        msg.content = None
+        choice = MagicMock()
+        choice.message = msg
+        resp = MagicMock()
+        resp.choices = [choice]
+        return resp
+
+    def make_text_response(text):
+        msg = MagicMock()
+        msg.tool_calls = None
+        msg.content = text
+        choice = MagicMock()
+        choice.message = msg
+        resp = MagicMock()
+        resp.choices = [choice]
+        return resp
+
+    async def fake_acompletion(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return make_tool_call_response()
+        return make_text_response("search result: hello world")
+
+    mock_providers = MagicMock()
+    mock_telemetry = MagicMock()
+    mock_telemetry.dispatch_stream_token = AsyncMock()
+    mock_tools = MagicMock()
+    mock_storage = MagicMock()
+
+    loop = AgentLoop(providers=mock_providers, telemetry=mock_telemetry, tools=mock_tools, storage=mock_storage)
+
+    native_functions = [
+        {
+            "name": "search",
+            "description": "Search for information",
+            "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+            "handler": "tool_call",
+        }
+    ]
+    node = WorkflowNode(
+        id="n1", name="Test", type="agent",
+        position={"x": 0, "y": 0},
+        config={"agentId": "a1", "nativeFunctions": native_functions, "maxFunctionCallRounds": 5}
+    )
+    agent = MissionAgentDefinition(
+        id="a1",
+        missionId="m1",
+        name="Agent1",
+        role="assistant",
+        systemPrompt="You are helpful.",
+        provider=ProviderConfig(id="scripted-local", label="Test", mode="local", model="scripted-local"),
+        tools=[],
+        toolPolicy=ToolPolicy(),
+        memoryProfile=MemoryProfile(),
+        handoffTargets=[],
+    )
+    provider = agent.provider
+
+    with patch("app.agent_loop.acompletion", new=fake_acompletion):
+        result = await loop.run(run_id="run1", node=node, agent=agent, provider=provider,
+                                 prompt="Find hello", prior_messages=None)
+
+    assert call_count == 2
+    assert result.completion == "search result: hello world"
+    assert len(result.function_call_log) == 1
+    assert result.function_call_log[0]["name"] == "search"
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_function_call_max_rounds(monkeypatch):
+    """Loop terminates at maxFunctionCallRounds even if LLM keeps calling tools."""
+    from app.agent_loop import AgentLoop
+    from unittest.mock import MagicMock, AsyncMock, patch
+    from app.schemas import WorkflowNode, MissionAgentDefinition, MemoryProfile, ProviderConfig, ToolPolicy
+    import json
+
+    async def always_tool_call(**kwargs):
+        tc = MagicMock()
+        tc.id = "call_x"
+        tc.function.name = "search"
+        tc.function.arguments = json.dumps({"query": "x"})
+        msg = MagicMock()
+        msg.tool_calls = [tc]
+        msg.content = None
+        choice = MagicMock()
+        choice.message = msg
+        resp = MagicMock()
+        resp.choices = [choice]
+        return resp
+
+    mock_providers = MagicMock()
+    mock_telemetry = MagicMock()
+    mock_telemetry.dispatch_stream_token = AsyncMock()
+
+    loop = AgentLoop(providers=mock_providers, telemetry=mock_telemetry, tools=MagicMock(), storage=MagicMock())
+
+    native_functions = [{"name": "search", "description": "S", "parameters": {}, "handler": "tool_call"}]
+    node = WorkflowNode(
+        id="n1", name="T", type="agent",
+        position={"x": 0, "y": 0},
+        config={"agentId": "a1", "nativeFunctions": native_functions, "maxFunctionCallRounds": 2}
+    )
+    agent = MissionAgentDefinition(
+        id="a1",
+        missionId="m1",
+        name="Agent1",
+        role="assistant",
+        systemPrompt="You are helpful.",
+        provider=ProviderConfig(id="scripted-local", label="Test", mode="local", model="scripted-local"),
+        tools=[],
+        toolPolicy=ToolPolicy(),
+        memoryProfile=MemoryProfile(),
+        handoffTargets=[],
+    )
+
+    with patch("app.agent_loop.acompletion", new=always_tool_call):
+        result = await loop.run(run_id="run1", node=node, agent=agent, provider=agent.provider,
+                                 prompt="search forever", prior_messages=None)
+
+    assert result.completion == ""  # maxRounds hit, no text response
+    assert len(result.function_call_log) == 2  # 2 rounds × 1 tool call each
