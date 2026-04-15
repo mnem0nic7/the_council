@@ -83,7 +83,7 @@ def test_handler_registry_contains_all_node_types():
     # The app-level executor registers all handlers at import time via main.py.
     # Importing the app here ensures _register_handlers() has been called.
     import app.main  # noqa: F401 — side effect: registers handlers
-    for node_type in ["agent", "tool", "router", "parallel", "memory", "delay", "human_input", "terminal"]:
+    for node_type in ["agent", "tool", "router", "parallel", "memory", "delay", "human_input", "terminal", "eval"]:
         handler = get_handler(node_type)
         assert handler is not None, f"No handler for {node_type}"
 
@@ -1929,3 +1929,189 @@ async def test_subworkflow_maps_output_back(monkeypatch):
     )
     result = await handler.execute(node, ctx)
     assert result.payload["summary"] == "summary result"
+
+
+# ---------------------------------------------------------------------------
+# Phase 18: EvalNodeHandler tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_eval_node_passes_target_output_to_judge(monkeypatch):
+    """Eval node runs judge agent against targetNodeId's output."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.agent_loop import AgentLoop, LoopResult
+    from app.node_handlers import ExecutionContext
+    from app.node_handlers.eval import EvalNodeHandler
+    from app.schemas import MemoryProfile, MissionAgentDefinition, ProviderConfig, ToolPolicy, WorkflowNode
+
+    judge_agent = MissionAgentDefinition(
+        id="judge-1",
+        missionId="m1",
+        name="Judge",
+        role="evaluator",
+        systemPrompt="You are a strict evaluator.",
+        provider=ProviderConfig(id="scripted-local", label="Test", mode="local", model="scripted-local"),
+        tools=[],
+        toolPolicy=ToolPolicy(),
+        memoryProfile=MemoryProfile(),
+        handoffTargets=[],
+    )
+
+    handler = EvalNodeHandler(agent_loop=MagicMock())
+    handler._agent_loop = MagicMock()
+    mock_loop_result = LoopResult(
+        completion='{"score": 0.8, "critique": "good", "pass": true}',
+        structured={"score": 0.8, "critique": "good", "pass": True},
+    )
+    handler._agent_loop.run = AsyncMock(return_value=mock_loop_result)
+
+    node = WorkflowNode(
+        id="eval1",
+        name="Eval",
+        type="eval",
+        position={"x": 0, "y": 0},
+        config={
+            "targetNodeId": "researcher",
+            "judgeAgentId": judge_agent.id,
+            "rubric": "Is this good?",
+            "passThreshold": 0.7,
+            "onFail": "continue",
+        },
+    )
+    agent_snapshot = [judge_agent.model_dump()]
+    ctx = ExecutionContext(
+        run_id="r1",
+        mission_id="m1",
+        input_payload={},
+        control_state={},
+        execution_state={},
+        agent_snapshot=agent_snapshot,
+        provider_overrides={},
+        results={"researcher": {"output": "some research output"}},
+    )
+
+    result = await handler.execute(node, ctx)
+    assert result.payload["eval"]["pass"] is True
+    assert result.payload["eval"]["score"] == 0.8
+    assert result.payload["targetNodeId"] == "researcher"
+    assert handler._agent_loop.run.called
+
+
+@pytest.mark.asyncio
+async def test_eval_node_on_fail_raises(monkeypatch):
+    """onFail=fail raises RuntimeError when judge returns pass=False."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.agent_loop import LoopResult
+    from app.node_handlers import ExecutionContext
+    from app.node_handlers.eval import EvalNodeHandler
+    from app.schemas import MemoryProfile, MissionAgentDefinition, ProviderConfig, ToolPolicy, WorkflowNode
+
+    judge_agent = MissionAgentDefinition(
+        id="judge-1",
+        missionId="m1",
+        name="Judge",
+        role="evaluator",
+        systemPrompt="You are a strict evaluator.",
+        provider=ProviderConfig(id="scripted-local", label="Test", mode="local", model="scripted-local"),
+        tools=[],
+        toolPolicy=ToolPolicy(),
+        memoryProfile=MemoryProfile(),
+        handoffTargets=[],
+    )
+
+    handler = EvalNodeHandler(agent_loop=MagicMock())
+    handler._agent_loop = MagicMock()
+    handler._agent_loop.run = AsyncMock(
+        return_value=LoopResult(
+            completion='{"score": 0.3, "critique": "poor", "pass": false}',
+            structured={"score": 0.3, "critique": "poor", "pass": False},
+        )
+    )
+
+    node = WorkflowNode(
+        id="eval1",
+        name="Eval",
+        type="eval",
+        position={"x": 0, "y": 0},
+        config={
+            "targetNodeId": "researcher",
+            "judgeAgentId": judge_agent.id,
+            "passThreshold": 0.7,
+            "onFail": "fail",
+        },
+    )
+    ctx = ExecutionContext(
+        run_id="r1",
+        mission_id="m1",
+        input_payload={},
+        control_state={},
+        execution_state={},
+        agent_snapshot=[judge_agent.model_dump()],
+        provider_overrides={},
+        results={"researcher": {"output": "bad output"}},
+    )
+
+    with pytest.raises(RuntimeError):
+        await handler.execute(node, ctx)
+
+
+@pytest.mark.asyncio
+async def test_eval_node_on_fail_continue_does_not_raise(monkeypatch):
+    """onFail=continue stores eval result and does not raise."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.agent_loop import LoopResult
+    from app.node_handlers import ExecutionContext
+    from app.node_handlers.eval import EvalNodeHandler
+    from app.schemas import MemoryProfile, MissionAgentDefinition, ProviderConfig, ToolPolicy, WorkflowNode
+
+    judge_agent = MissionAgentDefinition(
+        id="judge-1",
+        missionId="m1",
+        name="Judge",
+        role="evaluator",
+        systemPrompt="You are a strict evaluator.",
+        provider=ProviderConfig(id="scripted-local", label="Test", mode="local", model="scripted-local"),
+        tools=[],
+        toolPolicy=ToolPolicy(),
+        memoryProfile=MemoryProfile(),
+        handoffTargets=[],
+    )
+
+    handler = EvalNodeHandler(agent_loop=MagicMock())
+    handler._agent_loop = MagicMock()
+    handler._agent_loop.run = AsyncMock(
+        return_value=LoopResult(
+            completion='{"score": 0.3, "pass": false, "critique": "needs work"}',
+            structured={"score": 0.3, "pass": False, "critique": "needs work"},
+        )
+    )
+
+    node = WorkflowNode(
+        id="eval1",
+        name="Eval",
+        type="eval",
+        position={"x": 0, "y": 0},
+        config={
+            "targetNodeId": "researcher",
+            "judgeAgentId": judge_agent.id,
+            "passThreshold": 0.7,
+            "onFail": "continue",  # should NOT raise
+        },
+    )
+    ctx = ExecutionContext(
+        run_id="r1",
+        mission_id="m1",
+        input_payload={},
+        control_state={},
+        execution_state={},
+        agent_snapshot=[judge_agent.model_dump()],
+        provider_overrides={},
+        results={"researcher": {"output": "output"}},
+    )
+
+    result = await handler.execute(node, ctx)  # must not raise
+    assert result.payload["eval"]["pass"] is False

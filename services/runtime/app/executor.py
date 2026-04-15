@@ -44,6 +44,9 @@ class MissionExecutor:
 
     def _register_handlers(self) -> None:
         from app.node_handlers import agent, tool, router, parallel, memory, delay, human_input, terminal, subworkflow
+        from app.node_handlers import eval as eval_handler
+        from app.agent_loop import AgentLoop
+        self._agent_loop = AgentLoop(self.providers, self.telemetry, self.tools, self.storage)
         agent.make_handler(self)
         tool.make_handler(self)
         router.make_handler(self)
@@ -53,6 +56,7 @@ class MissionExecutor:
         human_input.make_handler(self)
         terminal.make_handler(self)
         subworkflow.make_handler(self)
+        eval_handler.make_handler(self._agent_loop)
 
     def start(self, run_id: str) -> None:
         if run_id not in self.tasks or self.tasks[run_id].done():
