@@ -5,7 +5,8 @@ export const stations = [
   { id: "tactical", label: "Tactical" },
   { id: "crew", label: "Crew" },
   { id: "engineering", label: "Engineering" },
-  { id: "archive", label: "Archive" }
+  { id: "archive", label: "Archive" },
+  { id: "mission-builder", label: "Mission Builder" }
 ] as const;
 
 export const toolCatalog: Array<{ id: ToolName; label: string }> = [

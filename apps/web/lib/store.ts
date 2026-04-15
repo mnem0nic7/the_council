@@ -13,7 +13,7 @@ import type {
 } from "@the-council/contracts";
 import { create } from "zustand";
 
-export type StationId = "command" | "tactical" | "crew" | "engineering" | "archive";
+export type StationId = "command" | "tactical" | "crew" | "engineering" | "archive" | "mission-builder";
 
 export type ReplayPayload = {
   mission: MissionRun;

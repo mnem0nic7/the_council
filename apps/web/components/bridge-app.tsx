@@ -726,6 +726,9 @@ export function BridgeApp() {
               {station === "archive" ? (
                 <ArchiveStation replay={replay} mission={selectedMission} run={selectedRun} />
               ) : null}
+              {station === "mission-builder" ? (
+                <MissionBuilderStation token={token} />
+              ) : null}
             </div>
           </section>
 
@@ -752,5 +755,126 @@ export function BridgeApp() {
         </div>
       </div>
     </main>
+  );
+}
+
+// ─── Mission Builder Station ──────────────────────────────────────────────────
+
+type BuilderMessage = { role: "user" | "assistant"; content: string };
+
+function MissionBuilderStation({ token }: { token: string | null }) {
+  const { setMissions, setTemplateAgents } = useCouncilStore();
+  const [messages, setMessages] = useState<BuilderMessage[]>([
+    {
+      role: "assistant",
+      content:
+        "Mission Builder online. I can create missions, agents, and workflows for you. " +
+        'Try: "Create a mission called Scout Alpha that searches for anomalies" or ' +
+        '"Add a recon agent to mission scout-alpha-1".'
+    }
+  ]);
+  const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [buildError, setBuildError] = useState<string | null>(null);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [messages]);
+
+  async function send() {
+    if (!input.trim() || busy || !token) return;
+    const userMsg: BuilderMessage = { role: "user", content: input.trim() };
+    const nextMessages = [...messages, userMsg];
+    setMessages(nextMessages);
+    setInput("");
+    setBusy(true);
+    setBuildError(null);
+    try {
+      const res = await fetch("/api/mission-builder", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages: nextMessages, token })
+      });
+      if (!res.ok) {
+        const detail = await res.text();
+        throw new Error(detail || `Request failed: ${res.status}`);
+      }
+      const data = (await res.json()) as {
+        message: string;
+        actionsPerformed: { type: string; name: string }[];
+      };
+      setMessages((prev) => [...prev, { role: "assistant", content: data.message }]);
+      if (data.actionsPerformed.length > 0) {
+        void api.listMissions(token).then(setMissions);
+        void api.listAgents(token).then(setTemplateAgents);
+      }
+    } catch (err) {
+      setBuildError(err instanceof Error ? err.message : "Mission Builder offline");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="flex h-full min-h-[68vh] flex-col">
+      <div className="mb-4">
+        <p className="panel-title text-cyan-300">Mission Builder</p>
+        <h2 className="mt-2 text-3xl font-semibold text-white">Conversational mission design</h2>
+      </div>
+
+      <div ref={scrollRef} className="scroll-thin mb-4 flex-1 space-y-3 overflow-y-auto pr-1">
+        {messages.map((msg, i) => (
+          <div
+            key={i}
+            className={`rounded-2xl border px-4 py-3 text-sm leading-6 ${
+              msg.role === "user"
+                ? "ml-8 border-amber-300/20 bg-amber-300/5 text-amber-100"
+                : "mr-8 border-cyan-300/20 bg-cyan-300/5 text-slate-200"
+            }`}
+          >
+            <span className="mb-1 block text-xs uppercase tracking-[0.18em] opacity-60">
+              {msg.role === "user" ? "Operator" : "Mission AI"}
+            </span>
+            {msg.content}
+          </div>
+        ))}
+        {busy && (
+          <div className="mr-8 rounded-2xl border border-cyan-300/20 bg-cyan-300/5 px-4 py-3 text-sm text-slate-400">
+            <span className="mb-1 block text-xs uppercase tracking-[0.18em] opacity-60">Mission AI</span>
+            Processing…
+          </div>
+        )}
+        {buildError && (
+          <p className="rounded-2xl border border-rose-400/40 px-4 py-3 text-sm text-rose-200">{buildError}</p>
+        )}
+      </div>
+
+      <div className="flex gap-3">
+        <input
+          className="flex-1 rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-300/50"
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              void send();
+            }
+          }}
+          placeholder="Describe a mission, agent, or workflow to create…"
+          disabled={busy || !token}
+        />
+        <button
+          type="button"
+          onClick={() => void send()}
+          disabled={busy || !input.trim() || !token}
+          className="rounded-2xl bg-gradient-to-r from-cyan-400 via-sky-300 to-amber-300 px-5 py-3 text-sm font-semibold uppercase tracking-[0.2em] text-slate-950 transition hover:brightness-110 disabled:opacity-60"
+        >
+          {busy ? "…" : "Send"}
+        </button>
+      </div>
+    </div>
   );
 }
