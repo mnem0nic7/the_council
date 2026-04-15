@@ -231,9 +231,64 @@ class AgentLoop:
             else:
                 handoff_chain.append(handoff_target_id)
 
+        # Reflection loop
+        reflection_cfg = node.config.get("reflection")
+        reflection_rounds = 0
+
+        if reflection_cfg and completion:
+            judge_system_prompt = reflection_cfg.get(
+                "judgeSystemPrompt",
+                "You are a critical evaluator. Score the output.",
+            )
+            max_rounds = int(reflection_cfg.get("maxRounds", 2))
+            rubric = reflection_cfg.get("rubric", "Is this response accurate and complete?")
+            pass_threshold = float(reflection_cfg.get("passThreshold", 0.7))
+
+            for _round in range(max_rounds):
+                eval_prompt = (
+                    f"Rubric: {rubric}\n\nOutput to evaluate:\n{completion}\n\n"
+                    f'Return JSON only: {{"score": <0-1>, "pass": <bool>, "critique": "<text>"}}'
+                )
+                judge_chunks: list[str] = []
+                async for token in self.providers.stream_complete(
+                    provider,
+                    system_prompt=judge_system_prompt,
+                    user_prompt=eval_prompt,
+                ):
+                    judge_chunks.append(token)
+
+                judge_text = "".join(judge_chunks)
+                try:
+                    judge_result = _json.loads(judge_text)
+                except (ValueError, _json.JSONDecodeError):
+                    judge_result = {"score": 1.0, "pass": True, "critique": ""}
+
+                reflection_rounds += 1
+                score = float(judge_result.get("score", 1.0))
+                passed = bool(judge_result.get("pass", True))
+
+                if passed or score >= pass_threshold:
+                    break
+
+                # Re-run main agent with critique
+                critique = judge_result.get("critique", "")
+                revised_prompt = f"{prompt}\n\nRevision requested. Critique: {critique}"
+                revised_chunks: list[str] = []
+                seq_r = 0
+                async for token in self.providers.stream_complete(
+                    provider,
+                    system_prompt=agent.systemPrompt,
+                    user_prompt=revised_prompt,
+                ):
+                    revised_chunks.append(token)
+                    await self.telemetry.dispatch_stream_token(run_id, node.id, token, seq_r)
+                    seq_r += 1
+                completion = "".join(revised_chunks)
+
         return LoopResult(
             completion=completion,
             structured=structured,
             route=route,
             handoff_chain=handoff_chain,
+            reflection_rounds=reflection_rounds,
         )

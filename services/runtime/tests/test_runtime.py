@@ -2115,3 +2115,140 @@ async def test_eval_node_on_fail_continue_does_not_raise(monkeypatch):
 
     result = await handler.execute(node, ctx)  # must not raise
     assert result.payload["eval"]["pass"] is False
+
+
+# ---------------------------------------------------------------------------
+# Phase 18 Task 12: AgentLoop reflection loop
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_reflection_reruns_below_threshold(monkeypatch):
+    """When reflection score < passThreshold, AgentLoop re-runs with critique."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.agent_loop import AgentLoop
+    from app.schemas import MemoryProfile, MissionAgentDefinition, ProviderConfig, ToolPolicy, WorkflowNode
+
+    judge_call_count = 0
+    main_call_count = 0
+
+    async def combined_fake_stream(*args, **kwargs):
+        nonlocal judge_call_count, main_call_count
+        system_prompt = kwargs.get("system_prompt", "")
+        if "score" in system_prompt.lower() or "evaluate" in system_prompt.lower() or "critic" in system_prompt.lower():
+            judge_call_count += 1
+            if judge_call_count == 1:
+                yield '{"score": 0.5, "pass": false, "critique": "needs more detail"}'
+            else:
+                yield '{"score": 0.9, "pass": true, "critique": "good now"}'
+        else:
+            main_call_count += 1
+            if main_call_count == 1:
+                yield "first completion"
+            else:
+                yield "revised completion"
+
+    mock_providers = MagicMock()
+    mock_providers.stream_complete = combined_fake_stream
+    mock_telemetry = MagicMock()
+    mock_telemetry.dispatch_stream_token = AsyncMock()
+
+    loop = AgentLoop(providers=mock_providers, telemetry=mock_telemetry, tools=MagicMock(), storage=MagicMock())
+
+    agent = MissionAgentDefinition(
+        id="a1",
+        missionId="m1",
+        name="Agent1",
+        role="assistant",
+        systemPrompt="You are helpful.",
+        provider=ProviderConfig(id="scripted-local", label="Test", mode="local", model="scripted-local"),
+        tools=[],
+        toolPolicy=ToolPolicy(),
+        memoryProfile=MemoryProfile(),
+        handoffTargets=[],
+    )
+    provider = agent.provider
+
+    node = WorkflowNode(
+        id="n1", name="Test", type="agent",
+        position={"x": 0, "y": 0},
+        config={
+            "agentId": "a1",
+            "reflection": {
+                "judgeSystemPrompt": "You are a critic. Score the output.",
+                "maxRounds": 2,
+                "rubric": "Is this good?",
+                "passThreshold": 0.8,
+            }
+        }
+    )
+
+    result = await loop.run(
+        run_id="run1", node=node, agent=agent, provider=provider,
+        prompt="Write something", prior_messages=None,
+    )
+
+    # First judge call returned score=0.5 (below 0.8), so agent re-ran → judge called again (score=0.9, pass)
+    assert result.reflection_rounds == 2  # two judge evaluations
+    assert result.completion == "revised completion"
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_reflection_exits_at_max_rounds(monkeypatch):
+    """Reflection loop exits after maxRounds even if score stays below threshold."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.agent_loop import AgentLoop
+    from app.schemas import MemoryProfile, MissionAgentDefinition, ProviderConfig, ToolPolicy, WorkflowNode
+
+    async def combined_stream(*args, **kwargs):
+        system_prompt = kwargs.get("system_prompt", "")
+        if "score" in system_prompt.lower() or "evaluate" in system_prompt.lower():
+            yield '{"score": 0.3, "pass": false, "critique": "still bad"}'
+        else:
+            yield "some output"
+
+    mock_providers = MagicMock()
+    mock_providers.stream_complete = combined_stream
+    mock_telemetry = MagicMock()
+    mock_telemetry.dispatch_stream_token = AsyncMock()
+
+    loop = AgentLoop(providers=mock_providers, telemetry=mock_telemetry, tools=MagicMock(), storage=MagicMock())
+
+    agent = MissionAgentDefinition(
+        id="a1",
+        missionId="m1",
+        name="Agent1",
+        role="assistant",
+        systemPrompt="You are helpful.",
+        provider=ProviderConfig(id="scripted-local", label="Test", mode="local", model="scripted-local"),
+        tools=[],
+        toolPolicy=ToolPolicy(),
+        memoryProfile=MemoryProfile(),
+        handoffTargets=[],
+    )
+    provider = agent.provider
+
+    node = WorkflowNode(
+        id="n1", name="Test", type="agent",
+        position={"x": 0, "y": 0},
+        config={
+            "agentId": "a1",
+            "reflection": {
+                "judgeSystemPrompt": "Evaluate this. Score it.",
+                "maxRounds": 1,
+                "passThreshold": 0.8,
+            }
+        }
+    )
+
+    result = await loop.run(
+        run_id="run1", node=node, agent=agent, provider=provider,
+        prompt="Write something", prior_messages=None,
+    )
+
+    # maxRounds=1 means at most 1 judge call; score always 0.3 but loop exits after 1 round
+    assert result.reflection_rounds == 1
+    # completion is the revised output (agent re-ran after the single failed round)
+    assert result.completion == "some output"
