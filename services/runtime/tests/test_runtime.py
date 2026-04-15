@@ -1053,15 +1053,10 @@ async def test_handoff_depth_limit() -> None:
     """12c: Handoff is skipped when depth limit is reached."""
     from unittest.mock import AsyncMock, MagicMock, patch
 
-    from app.executor import MissionExecutor
+    from app.agent_loop import AgentLoop, LoopResult
+    from app.node_handlers import ExecutionContext
+    from app.node_handlers.agent import AgentNodeHandler
     from app.schemas import MissionAgentDefinition, MemoryProfile, ProviderConfig, ToolPolicy, WorkflowNode
-    from app.telemetry import TelemetryHub
-
-    telemetry = MagicMock(spec=TelemetryHub)
-    telemetry.persist_event = MagicMock(return_value=MagicMock())
-    telemetry.dispatch_stream_token = AsyncMock()
-    telemetry._schedule_dispatch = MagicMock()
-    executor = MissionExecutor(telemetry)
 
     node = WorkflowNode(
         id="n1",
@@ -1085,29 +1080,47 @@ async def test_handoff_depth_limit() -> None:
         handoffTargets=["specialist-agent"],
     )
 
-    with patch.object(executor, "_mission_agent_from_snapshot", return_value=agent):
-        with patch.object(executor, "_store_artifact", new_callable=AsyncMock):
-            with patch.object(executor, "_store_memory"):
-                with patch("app.executor.SessionLocal") as mock_session_class:
-                    session_mock = MagicMock()
-                    mock_session_class.return_value.__enter__ = MagicMock(return_value=session_mock)
-                    mock_session_class.return_value.__exit__ = MagicMock(return_value=False)
-                    run_mock = MagicMock()
-                    run_mock.mission_id = "m1"
-                    run_mock.control_state = {}
-                    run_mock.provider_overrides = {}
-                    run_mock.execution_state = {}
-                    session_mock.get.return_value = run_mock
+    from app.executor import MissionExecutor
 
-                    result = await executor._run_agent_node(
-                        "run-1",
-                        node,
-                        {"mission": {"input": {"prompt": "test"}, "control": {}}, "results": {}},
-                        depth=0,  # maxHandoffDepth=0, so depth >= max_depth → skip
-                    )
+    mock_executor = MagicMock()
+    mock_executor.providers = MagicMock()
+    mock_executor.telemetry = MagicMock()
+    mock_executor.telemetry.dispatch_stream_token = AsyncMock()
+    mock_executor.tools = MagicMock()
+    mock_executor.storage = MagicMock()
+    mock_executor._mission_agent_from_snapshot_from_list = MagicMock(return_value=agent)
+    mock_executor._render_value = MagicMock(side_effect=lambda v, ctx: v)
+    mock_executor._store_artifact = AsyncMock()
+    mock_executor._store_memory = AsyncMock()
+    mock_executor._build_conversation_messages = MissionExecutor._build_conversation_messages
+
+    handler = AgentNodeHandler(mock_executor)
+
+    ctx = ExecutionContext(
+        run_id="run-1",
+        mission_id="m1",
+        input_payload={"prompt": "test"},
+        control_state={},
+        execution_state={},
+        agent_snapshot=[agent.model_dump()],
+        provider_overrides={},
+        results={},
+        depth=0,  # maxHandoffDepth=0, so depth >= max_depth → skip
+    )
+
+    # LoopResult with a handoff chain — handler should skip it due to depth limit
+    mock_loop_result = LoopResult(
+        completion="analysis done",
+        route=None,
+        handoff_chain=["specialist-agent"],
+    )
+
+    with patch.object(AgentLoop, "run", new=AsyncMock(return_value=mock_loop_result)):
+        result = await handler.execute(node, ctx)
 
     # Should complete without recursive call, just log the depth-limit warning
     assert "output" in result.payload
+    assert "handoffOutput" not in result.payload
 
 
 # ---------------------------------------------------------------------------
@@ -1627,3 +1640,79 @@ async def test_agent_loop_function_call_max_rounds(monkeypatch):
 
     assert result.completion == ""  # maxRounds hit, no text response
     assert len(result.function_call_log) == 2  # 2 rounds × 1 tool call each
+
+
+# ---------------------------------------------------------------------------
+# Phase 15 Task 7: AgentNodeHandler owns full agentic cycle via AgentLoop
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_agent_node_handler_execute_produces_output(monkeypatch):
+    """AgentNodeHandler.execute() calls AgentLoop and returns payload with 'output' key."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from app.agent_loop import AgentLoop, LoopResult
+    from app.node_handlers import ExecutionContext
+    from app.node_handlers.agent import AgentNodeHandler
+    from app.schemas import MissionAgentDefinition, MemoryProfile, ProviderConfig, ToolPolicy, WorkflowNode
+
+    mock_agent = MissionAgentDefinition(
+        id="a1",
+        missionId="m1",
+        name="TestAgent",
+        role="assistant",
+        systemPrompt="You are helpful.",
+        provider=ProviderConfig(id="scripted-local", label="Test", mode="local", model="scripted-local"),
+        tools=[],
+        toolPolicy=ToolPolicy(),
+        memoryProfile=MemoryProfile(),
+        handoffTargets=[],
+    )
+
+    mock_executor = MagicMock()
+    mock_executor.providers = MagicMock()
+    mock_executor.telemetry = MagicMock()
+    mock_executor.telemetry.dispatch_stream_token = AsyncMock()
+    mock_executor.tools = MagicMock()
+    mock_executor.storage = MagicMock()
+    mock_executor._mission_agent_from_snapshot_from_list = MagicMock(return_value=mock_agent)
+    mock_executor._render_value = MagicMock(side_effect=lambda v, ctx: v)
+    mock_executor._store_artifact = AsyncMock()
+    mock_executor._store_memory = AsyncMock()
+
+    # _build_conversation_messages is a static method — bind it from the real class
+    from app.executor import MissionExecutor
+    mock_executor._build_conversation_messages = MissionExecutor._build_conversation_messages
+
+    handler = AgentNodeHandler(mock_executor)
+
+    node = WorkflowNode(
+        id="n1",
+        name="Test",
+        type="agent",
+        position={"x": 0, "y": 0},
+        config={"agentId": "a1"},
+    )
+
+    agent_snapshot = [mock_agent.model_dump()]
+    ctx = ExecutionContext(
+        run_id="run1",
+        mission_id="m1",
+        input_payload={"prompt": "test"},
+        control_state={},
+        execution_state={},
+        agent_snapshot=agent_snapshot,
+        provider_overrides={},
+        results={},
+        depth=0,
+    )
+
+    mock_loop_result = LoopResult(completion="hello world", route=None, handoff_chain=[])
+
+    with patch.object(AgentLoop, "run", new=AsyncMock(return_value=mock_loop_result)):
+        result = await handler.execute(node, ctx)
+
+    assert result.payload["output"] == "hello world"
+    assert result.payload["agentId"] == "a1"
+    assert result.route is None

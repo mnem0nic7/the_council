@@ -398,179 +398,6 @@ class MissionExecutor:
         messages.append({"role": "user", "content": new_user_prompt})
         return messages
 
-    async def _run_agent_node(self, run_id: str, node: WorkflowNode, context: dict[str, Any], depth: int = 0) -> NodeResult:
-        with SessionLocal() as session:
-            run = session.get(MissionRun, run_id)
-            if run is None:
-                raise RuntimeError("Run not found")
-            mission = session.get(Mission, run.mission_id)
-            if mission is None:
-                raise RuntimeError("Mission not found")
-            agent = self._mission_agent_from_snapshot(run, node.config["agentId"])
-            overrides = run.provider_overrides or {}
-            provider_override = overrides.get(node.id) or overrides.get(agent.id)
-            provider = (
-                ProviderConfig.model_validate(provider_override) if provider_override else agent.provider
-            )
-            operator_notes = "\n".join((run.control_state or {}).get("retask_notes", []))
-
-        prompt_template = node.config.get(
-            "promptTemplate",
-            (
-                "Mission input:\n{{mission.input.prompt}}\n\n"
-                "Prior node outputs:\n{{results}}\n\n"
-                "Operator retask notes:\n{{mission.control.retask_notes}}"
-            ),
-        )
-        prompt = self._render_value(prompt_template, context)
-        if operator_notes and "{{mission.control.retask_notes}}" not in prompt_template:
-            prompt = f"{prompt}\n\nRetask notes:\n{operator_notes}"
-
-        multi_turn = bool(node.config.get("multiTurn", False))
-        agent_id = agent.id
-
-        if multi_turn:
-            with SessionLocal() as session:
-                run = session.get(MissionRun, run_id)
-                exec_state = copy.deepcopy(run.execution_state or {})
-            conversations = exec_state.setdefault("conversations", {})
-            prior_history = conversations.get(agent_id, [])
-            max_history_turns = int(node.config.get("maxHistoryTurns", 10))
-            messages = self._build_conversation_messages(
-                agent.systemPrompt, prior_history, prompt, max_history_turns
-            )
-
-            # Stream with full message history
-            chunks: list[str] = []
-            seq = 0
-            async for token in self.providers.stream_complete(
-                provider,
-                system_prompt=agent.systemPrompt,
-                user_prompt=prompt,
-                messages=messages,
-            ):
-                chunks.append(token)
-                await self.telemetry.dispatch_stream_token(run_id, node.id, token, seq)
-                seq += 1
-            completion = "".join(chunks)
-
-            # Persist updated conversation history
-            new_history = prior_history + [
-                {"role": "user", "content": prompt},
-                {"role": "assistant", "content": completion},
-            ]
-            with SessionLocal() as session:
-                run = session.get(MissionRun, run_id)
-                if run is not None:
-                    next_state = copy.deepcopy(run.execution_state or {})
-                    next_state.setdefault("conversations", {})[agent_id] = new_history
-                    run.execution_state = next_state
-                    session.commit()
-        else:
-            # Single-turn (current behavior)
-            chunks = []
-            seq = 0
-            async for token in self.providers.stream_complete(
-                provider,
-                system_prompt=agent.systemPrompt,
-                user_prompt=prompt,
-            ):
-                chunks.append(token)
-                await self.telemetry.dispatch_stream_token(run_id, node.id, token, seq)
-                seq += 1
-            completion = "".join(chunks)
-
-        route = None
-        if "ROUTE:" in completion:
-            route = completion.split("ROUTE:", 1)[1].splitlines()[0].strip()
-
-        handoff_target_id: str | None = None
-        if "HANDOFF:" in completion:
-            handoff_target_id = completion.split("HANDOFF:", 1)[1].splitlines()[0].strip()
-
-        if handoff_target_id and handoff_target_id not in agent.handoffTargets:
-            logger.warning(
-                "Agent %s emitted HANDOFF:%s but %s is not in handoffTargets; ignoring",
-                agent.id, handoff_target_id, handoff_target_id,
-            )
-            handoff_target_id = None
-
-        payload: dict[str, Any] = {"agentId": agent.id, "agentName": agent.name, "output": completion}
-        if route:
-            payload["route"] = route
-
-        if handoff_target_id:
-            max_depth = int(node.config.get("maxHandoffDepth", 3))
-            if depth >= max_depth:
-                logger.warning(
-                    "Handoff depth limit %d reached for node %s; skipping handoff to %s",
-                    max_depth, node.id, handoff_target_id,
-                )
-            else:
-                # Emit handoff telemetry
-                with SessionLocal() as session:
-                    run = session.get(MissionRun, run_id)
-                    if run is not None:
-                        self.telemetry.persist_event(
-                            session,
-                            run.mission_id,
-                            run.id,
-                            "node.handoff",
-                            f"Handing off from {agent.name} to {handoff_target_id}",
-                            node_id=node.id,
-                            data={"sourceAgent": agent.id, "targetAgent": handoff_target_id},
-                        )
-
-                # Find the target agent from the mission's agent snapshot
-                target_agent = None
-                with SessionLocal() as session:
-                    run = session.get(MissionRun, run_id)
-                    if run is not None:
-                        try:
-                            target_agent = self._mission_agent_from_snapshot(run, handoff_target_id)
-                        except RuntimeError as exc:
-                            logger.warning("Handoff target %s not found: %s", handoff_target_id, exc)
-
-                if target_agent is not None:
-                    # Create a synthetic node config for the target agent
-                    target_node = WorkflowNode(
-                        id=f"{node.id}-handoff-{handoff_target_id}",
-                        name=f"Handoff: {target_agent.name}",
-                        type="agent",
-                        position=node.position,
-                        config={
-                            "agentId": target_agent.id,
-                            "promptTemplate": (
-                                "You are receiving a handoff from another agent.\n"
-                                "Prior agent output:\n{{results." + node.id + ".output}}\n\n"
-                                "Mission input:\n{{mission.input.prompt}}"
-                            ),
-                        },
-                    )
-                    # Update context with current node's result for handoff template access
-                    handoff_context = copy.deepcopy(context)
-                    handoff_context.setdefault("results", {})[node.id] = {"output": completion}
-                    handoff_result = await self._run_agent_node(run_id, target_node, handoff_context, depth=depth + 1)
-                    payload["handoffOutput"] = {
-                        "agentId": target_agent.id,
-                        "agentName": target_agent.name,
-                        "output": handoff_result.payload.get("output", ""),
-                    }
-
-        await self._store_artifact(
-            run_id, node.id, "agent-output", node.name, json.dumps(payload, indent=2),
-            max_artifacts=agent.toolPolicy.maxArtifacts,
-        )
-        await self._store_memory(
-            run_id,
-            agent.id,
-            agent.memoryProfile.namespace,
-            completion,
-            tags=["agent", agent.role],
-            metadata={"nodeId": node.id},
-        )
-        return NodeResult(payload=payload, route=route)
-
     async def _run_tool_node(self, run_id: str, node: WorkflowNode, context: dict[str, Any]) -> NodeResult:
         with SessionLocal() as session:
             run = session.get(MissionRun, run_id)
@@ -729,6 +556,15 @@ class MissionExecutor:
             if payload.get("id") == mission_agent_id:
                 return MissionAgentDefinition.model_validate(payload)
         raise RuntimeError(f"Mission agent {mission_agent_id} not found")
+
+    def _mission_agent_from_snapshot_from_list(
+        self, agent_snapshot: list[dict], mission_agent_id: str
+    ) -> MissionAgentDefinition:
+        """Resolve a MissionAgentDefinition from an in-memory snapshot list (no DB access)."""
+        for payload in agent_snapshot or []:
+            if payload.get("id") == mission_agent_id or payload.get("local_id") == mission_agent_id:
+                return MissionAgentDefinition.model_validate(payload)
+        raise RuntimeError(f"Agent '{mission_agent_id}' not found in snapshot")
 
     def _ready_nodes(
         self,
