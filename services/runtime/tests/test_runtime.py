@@ -1316,3 +1316,74 @@ async def test_memory_retrieval_falls_back_to_term_overlap() -> None:
     assert result.payload["mode"] == "read"
     assert len(result.payload["matches"]) >= 1
     assert any("fox" in m for m in result.payload["matches"])
+
+
+# ---------------------------------------------------------------------------
+# Phase 15: AgentLoop tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_basic_completion(monkeypatch):
+    """AgentLoop returns a LoopResult with the completion text."""
+    from app.agent_loop import AgentLoop, LoopResult
+    from app.node_handlers import ExecutionContext
+    from app.schemas import MissionAgentDefinition, MemoryProfile, ProviderConfig, ToolPolicy, WorkflowNode
+
+    tokens_yielded = []
+
+    async def fake_stream(*args, **kwargs):
+        for token in ["hello ", "world"]:
+            tokens_yielded.append(token)
+            yield token
+
+    from unittest.mock import AsyncMock, MagicMock
+
+    mock_providers = MagicMock()
+    mock_providers.stream_complete = fake_stream
+    mock_telemetry = MagicMock()
+    mock_telemetry.dispatch_stream_token = AsyncMock()
+    mock_tools = MagicMock()
+    mock_storage = MagicMock()
+
+    loop = AgentLoop(
+        providers=mock_providers,
+        telemetry=mock_telemetry,
+        tools=mock_tools,
+        storage=mock_storage,
+    )
+
+    node = WorkflowNode(
+        id="n1",
+        name="Test",
+        type="agent",
+        position={"x": 0, "y": 0},
+        config={"agentId": "a1"},
+    )
+    agent = MissionAgentDefinition(
+        id="a1",
+        missionId="m1",
+        name="Agent1",
+        role="assistant",
+        systemPrompt="You are helpful.",
+        provider=ProviderConfig(id="scripted-local", label="Test", mode="local", model="scripted-local"),
+        tools=[],
+        toolPolicy=ToolPolicy(),
+        memoryProfile=MemoryProfile(),
+        handoffTargets=[],
+    )
+    provider = agent.provider
+
+    result = await loop.run(
+        run_id="run1",
+        node=node,
+        agent=agent,
+        provider=provider,
+        prompt="Say hello",
+        prior_messages=None,
+        depth=0,
+    )
+
+    assert result.completion == "hello world"
+    assert result.route is None
+    assert result.handoff_chain == []
