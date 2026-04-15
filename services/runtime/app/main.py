@@ -886,6 +886,32 @@ def replay_mission_run(
     )
 
 
+@app.post("/api/v1/admin/backfill-embeddings")
+async def backfill_embeddings(
+    current_user: Annotated[User, Depends(require_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> dict[str, Any]:
+    from .embeddings import embed_text
+
+    if not settings.embedding_enabled:
+        return {"status": "embedding_disabled"}
+
+    result = db.execute(select(MemoryRecord).where(MemoryRecord.embedding.is_(None)))
+    records = result.scalars().all()
+
+    updated = 0
+    for record in records:
+        text = record.content or ""
+        if text:
+            embedding = await embed_text(text)
+            if embedding is not None:
+                record.embedding = embedding
+                updated += 1
+
+    db.commit()
+    return {"status": "ok", "updated": updated}
+
+
 @app.websocket("/ws/runs/{run_id}")
 async def run_stream(websocket: WebSocket, run_id: str, token: Annotated[str, Query()]) -> None:
     try:

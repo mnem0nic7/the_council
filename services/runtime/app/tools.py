@@ -25,14 +25,16 @@ class ToolRunner:
         if tool_name not in policy.allowedTools:
             raise ToolPolicyError(f"Tool {tool_name} is not allowed for this mission")
         if tool_name == "shell":
-            return await self._run_shell(args, policy, run_id)
-        if tool_name == "filesystem":
-            return await self._run_filesystem(args, policy, run_id)
-        if tool_name == "api":
-            return await self._run_api(args, policy)
-        if tool_name == "web":
-            return await self._run_web(args, policy)
-        raise ToolPolicyError(f"Unknown tool {tool_name}")
+            result = await self._run_shell(args, policy, run_id)
+        elif tool_name == "filesystem":
+            result = await self._run_filesystem(args, policy, run_id)
+        elif tool_name == "api":
+            result = await self._run_api(args, policy)
+        elif tool_name == "web":
+            result = await self._run_web(args, policy)
+        else:
+            raise ToolPolicyError(f"Unknown tool {tool_name}")
+        return self._truncate_result(result, policy.maxTokens * 4)
 
     def _mission_workspace(self, run_id: str) -> Path:
         workspace = Path(self.settings.workspace_root) / run_id
@@ -75,7 +77,7 @@ class ToolRunner:
         workspace = self._mission_workspace(run_id)
         candidate = (workspace / relative_path).resolve()
         allowed_roots = [Path(root).resolve() for root in policy.writableRoots] + [workspace.resolve()]
-        if not any(str(candidate).startswith(str(root)) for root in allowed_roots):
+        if not any(candidate.is_relative_to(root) for root in allowed_roots):
             raise ToolPolicyError(f"Path {candidate} is outside mission writable roots")
 
         if action == "list":
@@ -134,6 +136,21 @@ class ToolRunner:
             body_text = await page.locator("body").inner_text()
             await browser.close()
         return {"title": title, "content": body_text[:8000]}
+
+    @staticmethod
+    def _truncate_result(result: dict[str, Any], max_chars: int) -> dict[str, Any]:
+        text_fields = {"stdout", "stderr", "content", "body"}
+        truncated = False
+        out = {}
+        for key, val in result.items():
+            if key in text_fields and isinstance(val, str) and len(val) > max_chars:
+                out[key] = val[:max_chars]
+                truncated = True
+            else:
+                out[key] = val
+        if truncated:
+            out["_truncated"] = True
+        return out
 
     @staticmethod
     def artifact_payload(result: dict[str, Any]) -> str:

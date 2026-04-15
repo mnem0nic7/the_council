@@ -74,6 +74,24 @@ def ensure_runtime_schema() -> None:
     action_columns = {column["name"] for column in inspector.get_columns("operator_actions")} if "operator_actions" in tables else set()
 
     statements: list[str] = []
+
+    if "node_errors" not in tables:
+        statements.append(
+            f"""CREATE TABLE IF NOT EXISTS node_errors (
+                id VARCHAR PRIMARY KEY,
+                mission_id VARCHAR NOT NULL,
+                run_id VARCHAR NOT NULL,
+                node_id VARCHAR NOT NULL,
+                attempt INTEGER NOT NULL,
+                error_type VARCHAR NOT NULL,
+                error_message TEXT NOT NULL,
+                traceback TEXT,
+                created_at {timestamp_type}
+            )"""
+        )
+        statements.append("CREATE INDEX IF NOT EXISTS ix_node_errors_mission_id ON node_errors (mission_id)")
+        statements.append("CREATE INDEX IF NOT EXISTS ix_node_errors_run_id ON node_errors (run_id)")
+        statements.append("CREATE INDEX IF NOT EXISTS ix_node_errors_node_id ON node_errors (node_id)")
     if "description" not in mission_columns:
         statements.append("ALTER TABLE missions ADD COLUMN description TEXT DEFAULT ''")
     if "workflow_definition" not in mission_columns:
@@ -93,6 +111,12 @@ def ensure_runtime_schema() -> None:
         statements.append("ALTER TABLE memory_records ADD COLUMN run_id VARCHAR")
     if "mission_agent_id" not in memory_columns and "memory_records" in tables:
         statements.append("ALTER TABLE memory_records ADD COLUMN mission_agent_id VARCHAR")
+    if "embedding" not in memory_columns and "memory_records" in tables:
+        if dialect == "postgresql":
+            statements.append("CREATE EXTENSION IF NOT EXISTS vector")
+            statements.append("ALTER TABLE memory_records ADD COLUMN IF NOT EXISTS embedding vector(1536)")
+        else:
+            statements.append("ALTER TABLE memory_records ADD COLUMN embedding BLOB")
     if "run_id" not in action_columns and "operator_actions" in tables:
         statements.append("ALTER TABLE operator_actions ADD COLUMN run_id VARCHAR")
 

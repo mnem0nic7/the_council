@@ -1,0 +1,38 @@
+
+> the-council@0.1.0 build
+> npm run build --workspace @the-council/contracts && npm run build --workspace @the-council/web
+
+
+> @the-council/contracts@0.1.0 build
+> tsc -p tsconfig.json && node scripts/export-schemas.cjs
+
+
+> @the-council/web@0.1.0 build
+> next build
+
+  ▲ Next.js 14.2.35
+
+   Creating an optimized production build ...
+ ✓ Compiled successfully
+   Linting and checking validity of types ...
+   Collecting page data ...
+   Generating static pages (0/5) ...
+   Generating static pages (1/5) 
+   Generating static pages (2/5) 
+   Generating static pages (3/5) 
+ ✓ Generating static pages (5/5)
+   Finalizing page optimization ...
+   Collecting build traces ...
+
+Route (app)                              Size     First Load JS
+┌ ○ /                                    265 kB          353 kB
+├ ○ /_not-found                          876 B          88.2 kB
+└ ○ /api/health                          0 B                0 B
++ First Load JS shared by all            87.3 kB
+  ├ chunks/1dd3208c-4482e292b18e2108.js  53.7 kB
+  ├ chunks/528-b419de2d2bcde660.js       31.7 kB
+  └ other shared chunks (total)          1.94 kB
+
+
+○  (Static)  prerendered as static content
+

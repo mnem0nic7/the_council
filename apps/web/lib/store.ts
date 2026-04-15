@@ -13,7 +13,7 @@ import type {
 } from "@the-council/contracts";
 import { create } from "zustand";
 
-export type StationId = "command" | "tactical" | "crew" | "engineering" | "archive";
+export type StationId = "command" | "tactical" | "crew" | "engineering" | "archive" | "mission-builder";
 
 export type ReplayPayload = {
   mission: MissionRun;
@@ -37,6 +37,11 @@ type CouncilState = {
   replay: ReplayPayload;
   selectedMissionId: string | null;
   selectedRunId: string | null;
+  streamingTokens: Record<string, string>;
+  awaitingInputPrompt: string | null;
+  initialLoad: boolean;
+  loading: Record<string, boolean>;
+  errors: Record<string, string | null>;
   setAuth: (token: string | null, username: string | null) => void;
   setStation: (station: StationId) => void;
   setTemplateAgents: (agents: AgentDefinition[]) => void;
@@ -55,6 +60,12 @@ type CouncilState = {
   setReplay: (replay: ReplayPayload) => void;
   setSelectedMissionId: (missionId: string | null) => void;
   setSelectedRunId: (runId: string | null) => void;
+  appendStreamToken: (nodeId: string, token: string) => void;
+  clearStreamToken: (nodeId: string) => void;
+  setAwaitingInputPrompt: (prompt: string | null) => void;
+  setInitialLoad: (loaded: boolean) => void;
+  setLoading: (key: string, loading: boolean) => void;
+  setError: (key: string, error: string | null) => void;
 };
 
 export const useCouncilStore = create<CouncilState>((set) => ({
@@ -72,6 +83,11 @@ export const useCouncilStore = create<CouncilState>((set) => ({
   replay: null,
   selectedMissionId: null,
   selectedRunId: null,
+  streamingTokens: {},
+  awaitingInputPrompt: null,
+  initialLoad: false,
+  loading: {},
+  errors: {},
   setAuth: (token, username) => set({ token, username }),
   setStation: (station) => set({ station }),
   setTemplateAgents: (templateAgents) => set({ templateAgents }),
@@ -149,5 +165,24 @@ export const useCouncilStore = create<CouncilState>((set) => ({
       telemetry: [],
       replay: null
     }),
-  setSelectedRunId: (selectedRunId) => set({ selectedRunId, telemetry: [], replay: null })
+  setSelectedRunId: (selectedRunId) => set({ selectedRunId, telemetry: [], replay: null }),
+  appendStreamToken: (nodeId, token) =>
+    set((state) => ({
+      streamingTokens: {
+        ...state.streamingTokens,
+        [nodeId]: (state.streamingTokens[nodeId] ?? "") + token,
+      },
+    })),
+  clearStreamToken: (nodeId) =>
+    set((state) => {
+      const next = { ...state.streamingTokens };
+      delete next[nodeId];
+      return { streamingTokens: next };
+    }),
+  setAwaitingInputPrompt: (prompt) => set({ awaitingInputPrompt: prompt }),
+  setInitialLoad: (loaded) => set({ initialLoad: loaded }),
+  setLoading: (key, value) =>
+    set((state) => ({ loading: { ...state.loading, [key]: value } })),
+  setError: (key, value) =>
+    set((state) => ({ errors: { ...state.errors, [key]: value } })),
 }));

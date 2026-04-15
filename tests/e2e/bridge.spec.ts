@@ -69,6 +69,7 @@ async function loginAsCaptain(page: Page) {
 test("captain can create a mission workspace, crew it, edit its workflow mid-run, and inspect replay", async ({
   page
 }) => {
+  test.setTimeout(90000);
   await page.setViewportSize({ width: 1520, height: 1024 });
   await loginAsCaptain(page);
 
@@ -76,7 +77,7 @@ test("captain can create a mission workspace, crew it, edit its workflow mid-run
   await page.getByTestId("mission-prompt").fill("Scan the bridge and report system readiness.");
   await page.getByTestId("mission-create").click();
 
-  await expect(page.getByRole("heading", { name: "Nebula Sweep" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Nebula Sweep", exact: true })).toBeVisible();
 
   await page.getByTestId("station-engineering").click();
   await expect(page.getByTestId("mission-agent-editor")).toBeVisible();

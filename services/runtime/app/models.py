@@ -2,12 +2,21 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from typing import Any, Optional
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint
 from sqlalchemy.dialects.sqlite import JSON as SQLiteJSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
+
+try:
+    from pgvector.sqlalchemy import Vector as PgVector
+    _embedding_type: Any = PgVector(1536)
+    _HAS_PGVECTOR = True
+except ImportError:
+    _embedding_type = LargeBinary()
+    _HAS_PGVECTOR = False
 
 
 def utcnow() -> datetime:
@@ -172,6 +181,7 @@ class MemoryRecord(Base):
     content: Mapped[str] = mapped_column(Text)
     tags: Mapped[list[str]] = mapped_column(SQLiteJSON, default=list)
     metadata_json: Mapped[dict] = mapped_column("metadata", SQLiteJSON, default=dict)
+    embedding: Mapped[Optional[bytes]] = mapped_column(_embedding_type, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -183,4 +193,18 @@ class OperatorAction(Base):
     run_id: Mapped[str | None] = mapped_column(ForeignKey("mission_runs.id"), nullable=True, index=True)
     action: Mapped[str] = mapped_column(String)
     payload: Mapped[dict] = mapped_column(SQLiteJSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class NodeErrorRecord(Base):
+    __tablename__ = "node_errors"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    mission_id: Mapped[str] = mapped_column(String, index=True)
+    run_id: Mapped[str] = mapped_column(String, index=True)
+    node_id: Mapped[str] = mapped_column(String, index=True)
+    attempt: Mapped[int] = mapped_column(Integer)
+    error_type: Mapped[str] = mapped_column(String)
+    error_message: Mapped[str] = mapped_column(Text)
+    traceback: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
