@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json as _json
 import logging
 from dataclasses import dataclass, field
 from typing import Any
+
+import jsonschema
 
 from app.providers import ProviderService
 from app.schemas import MissionAgentDefinition, ProviderConfig, WorkflowNode
@@ -88,6 +91,34 @@ class AgentLoop:
 
         completion = "".join(chunks)
 
+        # Structured output handling
+        structured: dict[str, Any] | None = None
+        output_schema = node.config.get("outputSchema")
+        if output_schema:
+            try:
+                structured = _json.loads(completion)
+                jsonschema.validate(structured, output_schema)
+            except (ValueError, _json.JSONDecodeError, jsonschema.ValidationError) as exc:
+                logger.warning("Structured output parse failed (%s), re-prompting once", exc)
+                retry_prompt = (
+                    f"{prompt}\n\nIMPORTANT: Your response must be valid JSON matching this schema:\n"
+                    f"{_json.dumps(output_schema, indent=2)}\nRespond with JSON only."
+                )
+                retry_chunks: list[str] = []
+                async for token in self.providers.stream_complete(
+                    provider,
+                    system_prompt=agent.systemPrompt,
+                    user_prompt=retry_prompt,
+                ):
+                    retry_chunks.append(token)
+                completion = "".join(retry_chunks)
+                try:
+                    structured = _json.loads(completion)
+                    jsonschema.validate(structured, output_schema)
+                except (ValueError, _json.JSONDecodeError, jsonschema.ValidationError):
+                    logger.error("Structured output failed after re-prompt for node %s", node.id)
+                    structured = None
+
         # Detect ROUTE:
         route: str | None = None
         if "ROUTE:" in completion:
@@ -109,6 +140,7 @@ class AgentLoop:
 
         return LoopResult(
             completion=completion,
+            structured=structured,
             route=route,
             handoff_chain=handoff_chain,
         )

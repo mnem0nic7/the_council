@@ -19,7 +19,8 @@ dependencies = [
   "minio>=7.2.12",
   "playwright>=1.49.0",
   "psycopg[binary]>=3.2.3",
-  "pgvector>=0.3.0"
+  "pgvector>=0.3.0",
+  "jsonschema>=4.23.0"
 ]
 
 [project.optional-dependencies]

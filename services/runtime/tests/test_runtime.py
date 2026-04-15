@@ -1387,3 +1387,102 @@ async def test_agent_loop_basic_completion(monkeypatch):
     assert result.completion == "hello world"
     assert result.route is None
     assert result.handoff_chain == []
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_structured_output_valid(monkeypatch):
+    """When outputSchema present and LLM returns valid JSON, result.structured is populated."""
+    import json
+    from app.agent_loop import AgentLoop
+    from unittest.mock import MagicMock, AsyncMock
+    from app.schemas import WorkflowNode, MissionAgentDefinition, MemoryProfile, ProviderConfig, ToolPolicy
+
+    schema = {"type": "object", "properties": {"score": {"type": "number"}}, "required": ["score"]}
+    fake_json = json.dumps({"score": 0.9})
+
+    async def fake_stream(*args, **kwargs):
+        yield fake_json
+
+    mock_providers = MagicMock()
+    mock_providers.stream_complete = fake_stream
+    mock_telemetry = MagicMock()
+    mock_telemetry.dispatch_stream_token = AsyncMock()
+
+    loop = AgentLoop(providers=mock_providers, telemetry=mock_telemetry, tools=MagicMock(), storage=MagicMock())
+
+    node = WorkflowNode(
+        id="n1", name="Test", type="agent",
+        position={"x": 0, "y": 0},
+        config={"agentId": "a1", "outputSchema": schema}
+    )
+    agent = MissionAgentDefinition(
+        id="a1",
+        missionId="m1",
+        name="Agent1",
+        role="assistant",
+        systemPrompt="You are helpful.",
+        provider=ProviderConfig(id="scripted-local", label="Test", mode="local", model="scripted-local"),
+        tools=[],
+        toolPolicy=ToolPolicy(),
+        memoryProfile=MemoryProfile(),
+        handoffTargets=[],
+    )
+    provider = agent.provider
+
+    result = await loop.run(run_id="run1", node=node, agent=agent, provider=provider,
+                             prompt="Score this", prior_messages=None)
+
+    assert result.structured == {"score": 0.9}
+    assert result.completion == fake_json
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_structured_output_invalid_reprompts(monkeypatch):
+    """When LLM returns invalid JSON, AgentLoop re-prompts once and returns valid result."""
+    import json
+    from app.agent_loop import AgentLoop
+    from unittest.mock import MagicMock, AsyncMock
+    from app.schemas import WorkflowNode, MissionAgentDefinition, MemoryProfile, ProviderConfig, ToolPolicy
+
+    schema = {"type": "object", "properties": {"score": {"type": "number"}}, "required": ["score"]}
+    call_count = 0
+
+    async def fake_stream(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            yield "not json at all"
+        else:
+            yield json.dumps({"score": 0.5})
+
+    mock_providers = MagicMock()
+    mock_providers.stream_complete = fake_stream
+    mock_telemetry = MagicMock()
+    mock_telemetry.dispatch_stream_token = AsyncMock()
+
+    loop = AgentLoop(providers=mock_providers, telemetry=mock_telemetry, tools=MagicMock(), storage=MagicMock())
+
+    node = WorkflowNode(
+        id="n1", name="Test", type="agent",
+        position={"x": 0, "y": 0},
+        config={"agentId": "a1", "outputSchema": schema}
+    )
+    agent = MissionAgentDefinition(
+        id="a1",
+        missionId="m1",
+        name="Agent1",
+        role="assistant",
+        systemPrompt="You are helpful.",
+        provider=ProviderConfig(id="scripted-local", label="Test", mode="local", model="scripted-local"),
+        tools=[],
+        toolPolicy=ToolPolicy(),
+        memoryProfile=MemoryProfile(),
+        handoffTargets=[],
+    )
+    provider = agent.provider
+
+    result = await loop.run(run_id="run1", node=node, agent=agent, provider=provider,
+                             prompt="Score this", prior_messages=None)
+
+    assert call_count == 2  # first call failed, second succeeded
+    assert result.structured == {"score": 0.5}
