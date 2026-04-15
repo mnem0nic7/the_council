@@ -54,6 +54,22 @@ export const AgentDefinitionSchema = z.object({
 });
 export type AgentDefinition = z.infer<typeof AgentDefinitionSchema>;
 
+export const NativeFunctionSchema = z.object({
+  name: z.string(),
+  description: z.string(),
+  parameters: z.record(z.any()),
+  handler: z.enum(["tool_call", "memory_search", "agent_call"]).default("tool_call"),
+});
+export type NativeFunction = z.infer<typeof NativeFunctionSchema>;
+
+export const ReflectionConfigSchema = z.object({
+  judgeSystemPrompt: z.string(),
+  maxRounds: z.number().int().min(1).default(2),
+  rubric: z.string().default(""),
+  passThreshold: z.number().min(0).max(1).default(0.7),
+});
+export type ReflectionConfig = z.infer<typeof ReflectionConfigSchema>;
+
 export const MissionAgentDefinitionSchema = AgentDefinitionSchema.extend({
   missionId: z.string(),
   templateAgentId: z.string().optional()
@@ -68,7 +84,9 @@ export const WorkflowNodeTypeSchema = z.enum([
   "memory",
   "delay",
   "human_input",
-  "terminal"
+  "terminal",
+  "subworkflow",
+  "eval"
 ]);
 export type WorkflowNodeType = z.infer<typeof WorkflowNodeTypeSchema>;
 
